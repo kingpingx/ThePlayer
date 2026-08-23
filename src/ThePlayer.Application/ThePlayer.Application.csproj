@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <ProjectReference Include="..\ThePlayer.Domain\ThePlayer.Domain.csproj" />
+  </ItemGroup>
+
+  <!--
+    Abstractions only. Application declares ports and orchestrates; it never references
+    a concrete logging, hosting or HTTP implementation.
+  -->
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="8.0.2" />
+    <PackageReference Include="Microsoft.Extensions.Options" Version="8.0.2" />
+  </ItemGroup>
+
+</Project>

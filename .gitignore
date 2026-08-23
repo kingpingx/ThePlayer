@@ -1,0 +1,46 @@
+# Build output
+[Bb]in/
+[Oo]bj/
+[Dd]ebug/
+[Rr]elease/
+artifacts/
+*.user
+*.suo
+.vs/
+.vscode/
+.idea/
+
+# Test results
+[Tt]est[Rr]esult*/
+coverage/
+*.trx
+*.coverage
+*.cobertura.xml
+
+# Node / Angular
+node_modules/
+dist/
+.angular/
+npm-debug.log*
+yarn-error.log*
+
+# Tooling downloads — MediaMTX binaries are fetched at runtime, never committed
+tools/bin/
+mediamtx
+mediamtx.exe
+mediamtx.yml
+
+# Generated test media — TestSupport creates these with FFmpeg at test time.
+# Named "generated-media" rather than "media" on purpose: git matches paths case-insensitively on
+# Windows, so a plain "media/" pattern also swallows source folders named Media/.
+tests/**/generated-media/
+*.mp4
+*.mkv
+*.h264
+*.h265
+
+# Local secrets and environment overrides
+appsettings.Local.json
+*.local.json
+.env
+.env.*

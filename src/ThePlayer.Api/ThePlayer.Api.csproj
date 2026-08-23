@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <ItemGroup>
+    <ProjectReference Include="..\ThePlayer.Application\ThePlayer.Application.csproj" />
+    <ProjectReference Include="..\ThePlayer.Infrastructure\ThePlayer.Infrastructure.csproj" />
+  </ItemGroup>
+
+  <!-- The Api project is the composition root, and the only place DI is configured. -->
+  <ItemGroup>
+    <InternalsVisibleTo Include="ThePlayer.Api.Tests" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    References every layer so the dependency rule can be asserted across all of them.
+    This is the one test project that is allowed to see everything.
+  -->
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\ThePlayer.Domain\ThePlayer.Domain.csproj" />
+    <ProjectReference Include="..\..\src\ThePlayer.Application\ThePlayer.Application.csproj" />
+    <ProjectReference Include="..\..\src\ThePlayer.Infrastructure\ThePlayer.Infrastructure.csproj" />
+    <ProjectReference Include="..\..\src\ThePlayer.Api\ThePlayer.Api.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="NetArchTest.Rules" Version="1.3.2" />
+  </ItemGroup>
+
+</Project>

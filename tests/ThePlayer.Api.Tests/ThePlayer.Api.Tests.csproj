@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\ThePlayer.Api\ThePlayer.Api.csproj" />
+    <ProjectReference Include="..\ThePlayer.TestSupport\ThePlayer.TestSupport.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.AspNetCore.Mvc.Testing" Version="8.0.8" />
+  </ItemGroup>
+
+</Project>

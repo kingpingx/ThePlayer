@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\ThePlayer.Application\ThePlayer.Application.csproj" />
+  </ItemGroup>
+
+  <!--
+    Not named *.Tests, so it does not inherit the shared test stack from
+    Directory.Build.props. It needs xunit only for IAsyncLifetime on the fixtures.
+  -->
+  <ItemGroup>
+    <PackageReference Include="xunit" Version="2.9.2" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,98 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+
+env:
+  DOTNET_NOLOGO: true
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+
+jobs:
+  # Fast tier: everything that needs no external tool. Runs on every push and fails in under a
+  # minute, so the common mistakes surface before the slower matrix has finished starting.
+  unit:
+    name: Unit and architecture tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Restore
+        run: dotnet restore
+
+      - name: Build
+        run: dotnet build --no-restore --configuration Release
+
+      - name: Domain tests
+        run: dotnet test tests/ThePlayer.Domain.Tests --no-build --configuration Release
+
+      - name: Application tests
+        run: dotnet test tests/ThePlayer.Application.Tests --no-build --configuration Release
+
+      # The dependency rule. Clean Architecture decays quietly, so this failing is a build failure
+      # rather than something spotted in review.
+      - name: Architecture tests
+        run: dotnet test tests/ThePlayer.Architecture.Tests --no-build --configuration Release
+
+  # Slow tier, and the one that earns its keep: running on both operating systems catches the path
+  # separators, executable suffixes and hardware assumptions that otherwise surface at deployment.
+  integration:
+    name: Integration (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Install FFmpeg (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
+      - name: Install FFmpeg (Windows)
+        if: runner.os == 'Windows'
+        run: choco install ffmpeg --no-progress -y
+
+      - name: Confirm FFmpeg is available
+        run: ffmpeg -version
+
+      - name: Restore
+        run: dotnet restore
+
+      - name: Build
+        run: dotnet build --no-restore --configuration Release
+
+      - name: Infrastructure tests
+        run: dotnet test tests/ThePlayer.Infrastructure.Tests --no-build --configuration Release
+
+      - name: API tests
+        run: dotnet test tests/ThePlayer.Api.Tests --no-build --configuration Release
+
+      # CI runners have no GPU, so encoder verification finds only the software profile. That is
+      # the correct answer there, and proving the fallback works on a machine with no acceleration
+      # is worth more than skipping the check.
+      - name: MediaMTX download script
+        run: ./tools/fetch-mediamtx.sh
+        if: runner.os == 'Linux'
+        shell: bash
+
+      - name: MediaMTX download script (Windows)
+        run: ./tools/fetch-mediamtx.ps1
+        if: runner.os == 'Windows'
+        shell: pwsh

@@ -7,6 +7,69 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [0.2.0] — Phase 1: First pixels
+
+H.264 cameras and video files now play in a browser over WebRTC. One FFmpeg process serves every
+viewer of the same stream, and stops shortly after the last one leaves.
+
+### Added
+
+- **`POST /api/watch`, `DELETE /api/watch/{viewerId}`, `GET /api/broadcasts`.** See
+  [PROTOCOL.md](docs/PROTOCOL.md).
+- **`FFmpegMediaInspector`** — ffprobe against a camera or file, reporting codec, size, frame rate
+  and whether it ends. A duration means a file; its absence means a live feed, and that one
+  distinction separates the two everywhere downstream.
+- **`BroadcastPlanner`** — the full negotiation table as a pure function of
+  `(format, mode, client support, hardware)`. Every row is a unit test rather than something only
+  observable by pointing at a real camera. Also produces per-mode availability with a reason for
+  each unavailable mode.
+- **`BroadcastCoordinator`** — reference-counted broadcasts. Viewers wanting the same bytes share a
+  pipeline; clients needing different output get their own from the same upstream. A broadcast
+  lingers 10 seconds after emptying so a page refresh does not rebuild the pipeline.
+- **`MediaMtxPaths`** — publishes over the control API. Cameras are pulled by MediaMTX directly;
+  files are pushed in by an on-demand FFmpeg, since MediaMTX cannot read a file itself. Both are
+  on-demand: nothing connects until a viewer asks.
+- **A WHEP harness at `/`** — a dependency-free page that probes the browser's codec support, calls
+  the API and plays the result. It exists because the Angular player is blocked on a Node upgrade,
+  and its handshake is the reference the Angular component will port.
+- **34 Application tests** covering the negotiation table, key derivation, reference counting,
+  linger, and the difference between an unavailable mode and an unbuilt one.
+
+### Fixed
+
+- **An unreachable camera returned a stack trace.** `TimeoutException` escaped the endpoint's catch
+  list, so a typo in an IP produced a 500 with file paths and internals in the body. Now a clean
+  `502` with a one-line reason.
+- **That failure took 20 seconds.** ffprobe had no RTSP timeout, so it hung until the outer command
+  timeout. Now ~6s via `-timeout`. Worth noting `-rw_timeout`, which looks like the right option,
+  is ignored by the RTSP demuxer.
+- **`TestSupport` was run as a test project** by `dotnet test`, reporting a spurious "testhost
+  process exited with error" beside the real results.
+- **`.gitignore` silently excluded a source folder.** `tests/**/media/` was intended for generated
+  test video but also matched `tests/**/Media/`, since git matches case-insensitively on Windows —
+  which quietly kept `MediaAddressTests.cs` out of the Phase 0 commit.
+
+### Security
+
+- `UseExceptionHandler` with `AddProblemDetails` outside Development, so an unhandled exception can
+  never reach a client as a stack trace. This system's exception messages can carry an upstream
+  address, and paths and internals are exactly what an attacker would like to read.
+- Verified against a live server: an RTSP URL with a deliberately wrong password produced **zero**
+  occurrences of that password across the whole server log, and the `502` body showed both our
+  redacted form and FFmpeg's echo of the URL scrubbed independently.
+
+### Known limitations
+
+- **Only `ServerAssisted` with an H.264 source plays.** Other modes return `501` naming the phase
+  that delivers them: client-side decoding in Phase 2, conversion in Phase 3, full server decoding
+  in Phase 5.
+- **The Angular player is still not scaffolded** — Node 20.9 remains below what any current Angular
+  CLI accepts. The WHEP harness stands in.
+- **Files play straight through.** No seek, pause or scrub bar; WebRTC has no seek concept, so the
+  feature would behave differently per mode.
+
+---
+
 ## [0.1.0] — Phase 0: Foundation
 
 The scaffolding, the credential-safe address type, MediaMTX supervision, and a health endpoint that

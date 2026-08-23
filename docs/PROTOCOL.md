@@ -15,10 +15,11 @@ Everything is JSON, camel-cased, over HTTP. Three transports:
 
 ---
 
-## Status: Phase 0
+## Status: Phase 1
 
-Only `GET /api/health` exists today. The rest is specified here as it is built, phase by phase, so
-that this document and the code stay in step rather than diverging.
+`GET /api/health`, `POST /api/watch`, `DELETE /api/watch/{viewerId}` and `GET /api/broadcasts`
+exist. The frame socket and the metrics stream are specified below as they will be built, so this
+document and the code stay in step rather than diverging.
 
 ---
 
@@ -69,46 +70,114 @@ either way.
 
 ---
 
-## Planned — Phase 1
+## `POST /api/watch`
 
-### `POST /api/watch`
-
-Starts or joins a broadcast. The client reports what it can decode, and that drives whether the
-server converts the stream at all.
+Starts a broadcast, or joins one already running. The client reports what it can decode, and that
+drives whether the server converts the stream at all.
 
 ```jsonc
 // request
 {
-  "address": "rtsp://user:pass@192.168.1.64:554/stream",
-  "mode": "ClientDecoded",
-  "clientDecodeSupport": {
+  "address": "rtsp://user:pass@192.168.1.64:554/stream",   // or "D:/videos/clip.mp4"
+  "mode": "ServerAssisted",                                 // ClientDecoded · ServerAssisted · ServerDecoded
+  "clientDecodeSupport": {                                  // optional; omitting it rules out ClientDecoded
     "webCodecs": true,
-    "codecs": [ { "codec": "H265", "supported": true, "hardwareAccelerated": true } ]
+    "codecs": [
+      { "codec": "H264", "supported": true, "hardwareAccelerated": true },
+      { "codec": "H265", "supported": true, "hardwareAccelerated": true }
+    ]
   }
 }
 ```
 
 ```jsonc
-// response
+// 200
 {
-  "viewerId": "8f14e45fceea167a",
-  "mode": "ClientDecoded",
-  "format": { "codec": "H265", "width": 1920, "height": 1080, "frameRate": 25, "live": true },
-  "converted": false,              // true when the server had to transcode
-  "modeAvailability": [ … ],       // per mode: offerable, and if not, why not
-  "transport": {                   // shape depends on mode
-    "kind": "WebSocket",
-    "url": "/ws/frames/8f14e45fceea167a"
+  "viewerId": "f35d7ffedacb495f",
+  "mode": "ServerAssisted",
+  "format": {
+    "codec": "H264", "width": 1280, "height": 720,
+    "frameRate": 25, "live": false, "durationSeconds": 30
+  },
+  "converted": false,
+  "modeAvailability": [
+    { "mode": "ClientDecoded",  "available": true,  "reason": null },
+    { "mode": "ServerAssisted", "available": true,  "reason": null },
+    { "mode": "ServerDecoded",  "available": true,  "reason": null }
+  ],
+  "transport": {
+    "kind": "WebRtc",
+    "url": "http://127.0.0.1:8889/f5b0da8732474e24-serverassisted-h264/whep"
   }
 }
 ```
 
-The request address **is never echoed back.** Responses carry the redacted form only.
+| Field | Notes |
+|---|---|
+| `converted` | The most interesting number in the system. `false` means the server is copying bytes and its codec cost is zero. |
+| `format.live` | `true` for a camera, `false` for a file — a file reaches a last frame and ends. |
+| `modeAvailability` | Every mode, whether it can be used for *this* stream on *this* client, and if not, a sentence the UI can show as-is. |
+| `transport.kind` | `WebRtc` → POST an SDP offer to `url`. `WebSocket` → open a frame socket at `url`. |
 
-### `DELETE /api/watch/{viewerId}`
+**The address is never echoed back.** Not in the response, not in errors, not in
+`GET /api/broadcasts`.
 
-Detaches. The broadcast lingers briefly after the last viewer leaves — default 10 seconds,
-configurable — so a page refresh does not tear down and rebuild the FFmpeg process.
+### Errors
+
+All failures are RFC 7807 problem documents whose `detail` is written to be shown to a user, and is
+always scrubbed of credentials.
+
+| Status | When |
+|---|---|
+| `400` | The address or mode could not be parsed, or the mode is unavailable for this stream and client. |
+| `501` | A valid request this phase cannot serve yet — `detail` names the phase that will. |
+| `502` | The upstream could not be read: unreachable, wrong credentials, or not a video. |
+
+```jsonc
+// 502 - note both the address and FFmpeg's echo of it are redacted
+{
+  "title": "Could not read the stream",
+  "status": 502,
+  "detail": "rtsp://admin:***@192.168.1.64:554/stream did not respond."
+}
+```
+
+## `DELETE /api/watch/{viewerId}`
+
+Detaches. Always `204`, even for a viewer id that does not exist — a closing tab may send both a
+beacon and a socket close, and the second is not an error.
+
+The broadcast is not torn down immediately. It lingers after its last viewer leaves (default 10
+seconds, configurable) so that a page refresh re-attaches to the running pipeline instead of
+tearing down an FFmpeg process and immediately rebuilding it.
+
+## `GET /api/broadcasts`
+
+What is live right now — a diagnostic surface. Addresses are redacted, which matters here more than
+anywhere else: this would otherwise be the easiest place in the system to read a camera password.
+
+```jsonc
+[
+  {
+    "key": "f5b0da8732474e24-serverassisted-h264",
+    "address": "rtsp://admin:***@192.168.1.64:554/stream",
+    "state": "Live",                  // Starting · Live · Ended · Failed
+    "mode": "ServerAssisted",
+    "converted": false,
+    "viewers": 2,                     // one pipeline, two tabs
+    "format": { "codec": "H264", "width": 1280, "height": 720, "frameRate": 25, "live": true }
+  }
+]
+```
+
+### How broadcasts are shared
+
+The key is `{address fingerprint}-{mode}-{output codec}[-converted]`. Two viewers wanting the same
+bytes share one pipeline; two clients needing *different* output — one that can decode H.265 and
+one that cannot — get their own pipelines from the same upstream.
+
+The fingerprint is a truncated SHA-256 of the address, never the address itself, so a password
+cannot become a dictionary key or appear in this listing.
 
 ---
 

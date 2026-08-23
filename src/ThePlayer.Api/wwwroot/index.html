@@ -1,0 +1,256 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ThePlayer — harness</title>
+<!--
+  A deliberately minimal WHEP client, used to verify the backend end to end in a real browser
+  while the Angular player is blocked on a Node upgrade.
+
+  The handshake below is exactly what server-assisted-player.component.ts will do, so this file is
+  the reference for that port rather than throwaway scaffolding.
+-->
+<style>
+  :root { color-scheme: light dark; --line: #8883; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 2rem; display: grid; gap: 1.25rem;
+    max-width: 60rem; margin-inline: auto;
+    font: 15px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  h1 { font-size: 1.25rem; margin: 0; font-weight: 650; }
+  .sub { margin: .25rem 0 0; opacity: .65; font-size: .875rem; }
+  form { display: grid; grid-template-columns: 1fr auto auto; gap: .5rem; align-items: center; }
+  input, select, button { font: inherit; padding: .55rem .7rem; border-radius: .5rem; border: 1px solid var(--line); }
+  input { background: transparent; color: inherit; font-family: ui-monospace, "Cascadia Code", monospace; font-size: .85rem; }
+  button { cursor: pointer; font-weight: 600; }
+  button[disabled] { opacity: .5; cursor: progress; }
+  video { width: 100%; aspect-ratio: 16/9; background: #0008; border-radius: .6rem; }
+  .facts { display: flex; flex-wrap: wrap; gap: .4rem; }
+  .fact {
+    border: 1px solid var(--line); border-radius: 2rem; padding: .2rem .7rem;
+    font-size: .8rem; font-variant-numeric: tabular-nums;
+  }
+  .fact b { font-weight: 650; }
+  .note { border-left: 3px solid var(--line); padding: .5rem 0 .5rem .8rem; font-size: .875rem; }
+  .note.bad { border-color: #e5484d; }
+  .note.good { border-color: #30a46c; }
+  pre { margin: 0; font-size: .75rem; opacity: .7; white-space: pre-wrap; word-break: break-all; }
+  fieldset { border: 1px solid var(--line); border-radius: .6rem; padding: .75rem 1rem; }
+  legend { font-size: .8rem; opacity: .7; padding-inline: .4rem; }
+  .modes { display: grid; gap: .35rem; font-size: .85rem; }
+  .modes div { display: flex; gap: .5rem; }
+  .modes .no { opacity: .6; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>ThePlayer — verification harness</h1>
+  <p class="sub">
+    Paste an RTSP URL (credentials in the URL are fine) or a full path to a video file.
+    Phase 1 serves <b>ServerAssisted</b> with H.264 sources.
+  </p>
+</header>
+
+<form id="form">
+  <input id="address" required spellcheck="false"
+         placeholder="rtsp://user:pass@192.168.1.64:554/stream   or   D:\videos\clip.mp4">
+  <select id="mode">
+    <option value="ServerAssisted">Decode on server (assisted)</option>
+    <option value="ClientDecoded">Decode on client</option>
+    <option value="ServerDecoded">Decode on server (full)</option>
+  </select>
+  <button id="play" type="submit">Play</button>
+</form>
+
+<div id="status"></div>
+
+<video id="video" autoplay muted playsinline controls></video>
+
+<div class="facts" id="facts"></div>
+
+<fieldset>
+  <legend>What this browser can decode</legend>
+  <div class="modes" id="capabilities">probing…</div>
+</fieldset>
+
+<fieldset>
+  <legend>Mode availability for this stream</legend>
+  <div class="modes" id="availability">play something first</div>
+</fieldset>
+
+<pre id="log"></pre>
+
+<script type="module">
+const $ = id => document.getElementById(id);
+const log = m => { $('log').textContent = `${new Date().toLocaleTimeString()}  ${m}\n` + $('log').textContent; };
+
+let viewerId = null;
+let pc = null;
+
+/* ---------------------------------------------------------------------------------------------
+   Capability probe.
+
+   The same matrix the Angular capability panel will show. hardwareAcceleration is probed
+   separately from plain support: a software-only decoder is *supported* but a poor choice at
+   1080p, and that difference is worth surfacing rather than silently accepting.
+   --------------------------------------------------------------------------------------------- */
+const CODECS = [
+  ['H264', 'avc1.42001f',      'H.264'],
+  ['H265', 'hev1.1.6.L93.B0',  'H.265'],
+  ['Vp8',  'vp8',              'VP8'  ],
+  ['Vp9',  'vp09.00.10.08',    'VP9'  ],
+  ['Av1',  'av01.0.04M.08',    'AV1'  ],
+];
+
+async function probeCapabilities() {
+  const webCodecs = typeof window.VideoDecoder === 'function';
+  const codecs = [];
+
+  for (const [name, codecString, label] of CODECS) {
+    let supported = false, hardware = false;
+
+    if (webCodecs) {
+      const config = { codec: codecString, codedWidth: 1280, codedHeight: 720 };
+      try {
+        supported = (await VideoDecoder.isConfigSupported(config)).supported === true;
+        if (supported) {
+          hardware = (await VideoDecoder.isConfigSupported(
+            { ...config, hardwareAcceleration: 'prefer-hardware' })).supported === true;
+        }
+      } catch { /* an unrecognised codec string throws rather than returning false */ }
+    }
+
+    codecs.push({ codec: name, supported, hardwareAccelerated: hardware, label });
+  }
+
+  $('capabilities').innerHTML = webCodecs
+    ? codecs.map(c => `<div class="${c.supported ? '' : 'no'}">
+         <span>${c.supported ? '✓' : '✗'}</span>
+         <b>${c.label}</b>
+         <span>${c.supported ? (c.hardwareAccelerated ? 'hardware' : 'software only') : 'no decoder'}</span>
+       </div>`).join('')
+    : '<div class="no">This browser has no WebCodecs API, so client-side decoding is unavailable.</div>';
+
+  return { webCodecs, codecs: codecs.map(({ label, ...rest }) => rest) };
+}
+
+const capabilities = await probeCapabilities();
+
+/* ---------------------------------------------------------------------------------------------
+   WHEP handshake.
+
+   ICE gathering is awaited to completion rather than trickled. WHEP supports trickle over PATCH,
+   but waiting costs a fraction of a second on a LAN and removes a whole class of ordering bugs.
+   --------------------------------------------------------------------------------------------- */
+async function waitForIce(connection) {
+  if (connection.iceGatheringState === 'complete') return;
+
+  await new Promise(resolve => {
+    // A camera on a slow interface can leave gathering pending; play with what we have rather
+    // than hanging forever.
+    const done = () => { clearTimeout(timer); resolve(); };
+    const timer = setTimeout(done, 3000);
+    connection.addEventListener('icegatheringstatechange', () => {
+      if (connection.iceGatheringState === 'complete') done();
+    });
+  });
+}
+
+async function playWhep(url) {
+  pc = new RTCPeerConnection({ iceServers: [] });
+  pc.addTransceiver('video', { direction: 'recvonly' });
+  pc.ontrack = event => { $('video').srcObject = event.streams[0]; };
+  pc.addEventListener('connectionstatechange', () => log(`peer connection: ${pc.connectionState}`));
+
+  await pc.setLocalDescription(await pc.createOffer());
+  await waitForIce(pc);
+
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/sdp' },
+    body: pc.localDescription.sdp,
+  });
+
+  if (!response.ok) throw new Error(`WHEP returned ${response.status}: ${await response.text()}`);
+
+  await pc.setRemoteDescription({ type: 'answer', sdp: await response.text() });
+  log('WHEP answer applied');
+}
+
+function stop() {
+  if (pc) { pc.close(); pc = null; }
+  $('video').srcObject = null;
+
+  if (viewerId) {
+    // keepalive so the detach still lands if the tab is closing.
+    fetch(`/api/watch/${viewerId}`, { method: 'DELETE', keepalive: true }).catch(() => {});
+    viewerId = null;
+  }
+}
+
+function say(kind, html) { $('status').innerHTML = `<div class="note ${kind}">${html}</div>`; }
+
+$('form').addEventListener('submit', async event => {
+  event.preventDefault();
+  stop();
+  $('play').disabled = true;
+  say('', 'Inspecting…');
+
+  try {
+    const response = await fetch('/api/watch', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        address: $('address').value.trim(),
+        mode: $('mode').value,
+        clientDecodeSupport: capabilities,
+      }),
+    });
+
+    const body = await response.json();
+
+    if (!response.ok) {
+      // ProblemDetails from the API. The detail text is written to be shown as-is.
+      say('bad', `<b>${body.title ?? 'Failed'}</b><br>${body.detail ?? response.statusText}`);
+      return;
+    }
+
+    viewerId = body.viewerId;
+    const f = body.format;
+
+    $('facts').innerHTML = [
+      ['codec', f.codec], ['size', `${f.width}×${f.height}`],
+      ['fps', f.frameRate], ['kind', f.live ? 'live' : `file, ${Math.round(f.durationSeconds)}s`],
+      ['mode', body.mode], ['converted', body.converted ? 'yes' : 'no — passthrough'],
+    ].map(([k, v]) => `<span class="fact">${k} <b>${v}</b></span>`).join('');
+
+    $('availability').innerHTML = body.modeAvailability.map(m =>
+      `<div class="${m.available ? '' : 'no'}">
+         <span>${m.available ? '✓' : '✗'}</span><b>${m.mode}</b>
+         <span>${m.reason ?? ''}</span>
+       </div>`).join('');
+
+    log(`viewer ${viewerId} · transport ${body.transport.kind} · ${body.transport.url}`);
+
+    if (body.transport.kind !== 'WebRtc') {
+      say('bad', 'This harness only implements the WebRTC transport. Phase 2 adds the frame socket.');
+      return;
+    }
+
+    await playWhep(body.transport.url);
+    say('good', `Playing. Server is <b>${body.converted ? 'converting' : 'not touching'}</b> this stream.`);
+  } catch (error) {
+    say('bad', `<b>Failed</b><br>${error.message}`);
+    log(error.stack ?? String(error));
+  } finally {
+    $('play').disabled = false;
+  }
+});
+
+addEventListener('pagehide', stop);
+</script>
+</body>
+</html>

@@ -2,6 +2,13 @@
 
   <PropertyGroup>
     <IsPackable>false</IsPackable>
+
+    <!--
+      It is a helper library, not a test project. Without this, `dotnet test` on the solution tries
+      to run it as one - it references xunit but has no test host - and reports a confusing
+      "testhost process exited with error" alongside the real results.
+    -->
+    <IsTestProject>false</IsTestProject>
   </PropertyGroup>
 
   <ItemGroup>

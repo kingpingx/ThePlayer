@@ -7,9 +7,9 @@ Give it an address (`rtsp://user:pass@camera/stream`, or a path to a video file)
 browser. An H.265 feed plays in a browser that cannot decode H.265. A browser that *can* decode
 H.265 gets the original bytes untouched, and the server's conversion cost drops to zero.
 
-> **Status:** Phase 0 (`v0.1.0`) — foundation. The solution, the credential-safe address type,
-> MediaMTX supervision and the health endpoint are in place. Video does not play yet; that is
-> Phase 1. See [Roadmap](#roadmap).
+> **Status:** Phase 1 (`v0.2.0`) — first pixels. H.264 cameras and video files play in Chrome over
+> WebRTC, with one FFmpeg process shared by every viewer of the same stream. Other modes return
+> `501` naming the phase that delivers them. See [Roadmap](#roadmap).
 
 ---
 
@@ -74,8 +74,30 @@ winget install OpenJS.NodeJS.LTS
 # 2. Start the server - it launches and supervises MediaMTX itself
 dotnet run --project src/ThePlayer.Api
 
-# 3. Confirm it came up
-curl http://localhost:5172/api/health
+# 3. Open the player
+#    http://localhost:5172
+```
+
+Paste an RTSP URL — credentials in the URL are fine — or a full path to a video file, and press
+Play. The page shows what your browser can decode, what the stream turned out to be, and whether
+the server had to convert it.
+
+No camera to hand? Make one:
+
+```bash
+ffmpeg -f lavfi -i "testsrc2=size=1280x720:rate=25:duration=30" \
+       -c:v libx264 -preset ultrafast -pix_fmt yuv420p -g 50 sample.mp4
+```
+
+> The page at `/` is a deliberately minimal WHEP client, standing in until the Angular player is
+> unblocked. Its handshake is what `server-assisted-player.component.ts` will do, so it is the
+> reference for that port rather than throwaway scaffolding.
+
+### Check the server
+
+```bash
+curl http://localhost:5172/api/health      # MediaMTX, FFmpeg, acceleration
+curl http://localhost:5172/api/broadcasts  # what is live, and how many are watching each
 ```
 
 A healthy response reports the MediaMTX process, the FFmpeg version, and the acceleration
@@ -171,8 +193,8 @@ other processes of the same user, and the server will connect to whatever addres
 
 | Phase | | Tag |
 |---|---|---|
-| 0 | Foundation — solution, `MediaAddress`, MediaMTX supervision, health, CI | `v0.1.0` |
-| 1 | First pixels — H.264 RTSP feeds and files play via WebRTC | `v0.2.0` |
+| ✅ 0 | Foundation — solution, `MediaAddress`, MediaMTX supervision, health, CI | `v0.1.0` |
+| ✅ 1 | First pixels — H.264 RTSP feeds and files play via WebRTC | `v0.2.0` |
 | 2 | Client-side decoding and the capability panel | `v0.3.0` |
 | 3 | H.265 conversion and hardware detection | `v0.4.0` |
 | 4 | Server CPU and GPU live in the browser | `v0.5.0` |

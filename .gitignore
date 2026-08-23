@@ -44,3 +44,6 @@ appsettings.Local.json
 *.local.json
 .env
 .env.*
+
+# Generated sample media (see README for the ffmpeg command)
+sample/

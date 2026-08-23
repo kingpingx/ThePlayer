@@ -1,5 +1,10 @@
+using ThePlayer.Application;
+using ThePlayer.Application.Broadcasting;
 using ThePlayer.Application.Monitoring;
+using ThePlayer.Domain.Broadcasting;
+using ThePlayer.Domain.Media;
 using ThePlayer.Domain.Monitoring;
+using ThePlayer.Domain.Playback;
 
 namespace ThePlayer.Api;
 
@@ -24,7 +29,148 @@ public static class Endpoints
             .WithName("GetHealth")
             .Produces<HealthResponse>()
             .Produces<HealthResponse>(StatusCodes.Status503ServiceUnavailable);
+
+        app.MapPost("/api/watch", StartWatchingAsync)
+            .WithName("StartWatching")
+            .Produces<WatchResponse>()
+            .ProducesProblem(StatusCodes.Status400BadRequest)
+            .ProducesProblem(StatusCodes.Status501NotImplemented)
+            .ProducesProblem(StatusCodes.Status502BadGateway);
+
+        app.MapDelete("/api/watch/{viewerId}", async (
+                string viewerId,
+                BroadcastCoordinator coordinator,
+                CancellationToken cancellationToken) =>
+            {
+                await coordinator.DetachAsync(viewerId, cancellationToken);
+
+                // Always 204, even for an unknown viewer. A browser closing a tab may send both a
+                // beacon and a socket close, and the second one is not an error.
+                return Results.NoContent();
+            })
+            .WithName("StopWatching");
+
+        app.MapGet("/api/broadcasts", async (
+                BroadcastCoordinator coordinator,
+                CancellationToken cancellationToken) =>
+            {
+                var live = await coordinator.ListAsync(cancellationToken);
+                return Results.Ok(live.Select(ToSummary).ToList());
+            })
+            .WithName("ListBroadcasts")
+            .Produces<IReadOnlyList<BroadcastSummary>>();
     }
+
+    private static async Task<IResult> StartWatchingAsync(
+        WatchRequest request,
+        BroadcastCoordinator coordinator,
+        CancellationToken cancellationToken)
+    {
+        if (!MediaAddress.TryParse(request.Address, out var address, out var addressError))
+        {
+            return Problem(StatusCodes.Status400BadRequest, "Invalid address", addressError);
+        }
+
+        if (!Enum.TryParse<PlaybackMode>(request.Mode, ignoreCase: true, out var mode))
+        {
+            return Problem(
+                StatusCodes.Status400BadRequest,
+                "Unknown mode",
+                $"'{request.Mode}' is not a playback mode. Expected one of: " +
+                $"{string.Join(", ", Enum.GetNames<PlaybackMode>())}.");
+        }
+
+        try
+        {
+            var ticket = await coordinator.AttachAsync(
+                address,
+                mode,
+                ToClientSupport(request.ClientDecodeSupport),
+                cancellationToken);
+
+            return Results.Ok(ToResponse(ticket));
+        }
+        catch (MediaInspectionException ex)
+        {
+            // The upstream is the problem, not the request. 502 says so, and the message is
+            // already scrubbed of credentials by the inspector.
+            return Problem(StatusCodes.Status502BadGateway, "Could not read the stream", ex.Message);
+        }
+        catch (InvalidOperationException ex)
+        {
+            // The planner rejected this mode for this stream and client - the reason is written
+            // to be shown to a user.
+            return Problem(StatusCodes.Status400BadRequest, "Mode not available", ex.Message);
+        }
+        catch (NotSupportedException ex)
+        {
+            // A real plan that this phase cannot execute yet. 501 rather than 400: the request is
+            // valid, the server just does not do it yet.
+            return Problem(StatusCodes.Status501NotImplemented, "Not implemented yet", ex.Message);
+        }
+    }
+
+    private static IResult Problem(int statusCode, string title, string? detail) =>
+        Results.Problem(detail: detail, title: title, statusCode: statusCode);
+
+    private static ClientDecodeSupport ToClientSupport(ClientDecodeSupportRequest? request)
+    {
+        if (request is null)
+        {
+            return ClientDecodeSupport.None;
+        }
+
+        var codecs = request.Codecs
+            .Select(codec => new
+            {
+                Parsed = Enum.TryParse<VideoCodec>(codec.Codec, ignoreCase: true, out var value)
+                    ? value
+                    : VideoCodec.Unknown,
+                codec.Supported,
+                codec.HardwareAccelerated,
+            })
+            // A codec name we do not recognise is dropped rather than treated as decodable. Being
+            // wrong in that direction produces a stream the client cannot play.
+            .Where(entry => entry.Parsed != VideoCodec.Unknown)
+            .Select(entry => new CodecSupport(entry.Parsed, entry.Supported, entry.HardwareAccelerated))
+            .ToList();
+
+        return new ClientDecodeSupport(request.WebCodecs, codecs);
+    }
+
+    private static WatchResponse ToResponse(WatchTicket ticket) => new(
+        ViewerId: ticket.ViewerId,
+        Mode: ticket.Mode.ToString(),
+        Format: ToResponse(ticket.Format),
+        Converted: ticket.Converted,
+        ModeAvailability: ticket.Availability
+            .Select(entry => new ModeAvailabilityResponse(
+                entry.Mode.ToString(),
+                entry.Available,
+                entry.Reason))
+            .ToList(),
+        Transport: ticket.WhepUrl is { } whep
+            ? new TransportResponse("WebRtc", whep.ToString())
+            : new TransportResponse("WebSocket", ticket.FrameSocketPath ?? string.Empty));
+
+    private static VideoFormatResponse ToResponse(VideoFormat format) => new(
+        Codec: format.Codec.ToString(),
+        Width: format.Width,
+        Height: format.Height,
+        FrameRate: format.FrameRate,
+        Live: format.IsLive,
+        DurationSeconds: format.Duration?.TotalSeconds);
+
+    private static BroadcastSummary ToSummary(Broadcast broadcast) => new(
+        Key: broadcast.Key,
+        // Display, never the raw address - this endpoint is a diagnostic surface and would
+        // otherwise be the easiest place in the system to read a camera password.
+        Address: broadcast.Address.Display,
+        State: broadcast.State.ToString(),
+        Mode: broadcast.Plan.Mode.ToString(),
+        Converted: broadcast.Plan.RequiresConversion,
+        Viewers: broadcast.ViewerCount,
+        Format: ToResponse(broadcast.Format));
 
     private static HealthResponse ToResponse(SystemHealth health) => new(
         Healthy: health.IsHealthy,

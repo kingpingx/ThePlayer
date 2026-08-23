@@ -21,6 +21,16 @@ public sealed class FFmpegOptions
     public TimeSpan CommandTimeout { get; set; } = TimeSpan.FromSeconds(20);
 
     /// <summary>
+    /// How long to wait for an RTSP host to answer before giving up on it.
+    /// <para>
+    /// Kept well below <see cref="CommandTimeout"/> so that the common failure - a typo in the
+    /// camera's IP - reports back in a few seconds rather than making someone stare at a spinner
+    /// for the full command timeout.
+    /// </para>
+    /// </summary>
+    public TimeSpan RtspConnectTimeout { get; set; } = TimeSpan.FromSeconds(6);
+
+    /// <summary>
     /// Whether to confirm each hardware encoder by actually encoding a frame with it at startup.
     /// <para>
     /// On by default, and worth the second or so it costs. An FFmpeg build lists every encoder it

@@ -201,11 +201,15 @@ other processes of the same user, and the server will connect to whatever addres
 | 5 | Full server decoding and the three-way comparison | `v0.6.0` |
 | 6 | Docker, auth, docs | `v1.0.0` |
 
+[docs/ROADMAP.md](docs/ROADMAP.md) has the full plan for phases 2–6 — components, FFmpeg arguments,
+risks and verification steps for each.
+
 **Deliberately out of scope:** transport controls for files (WebRTC cannot seek at all, so a scrub
 bar would work in one mode and not the others), audio, recording, and WebTransport.
 
 ## Documentation
 
+- [ROADMAP.md](docs/ROADMAP.md) — the plan for phases 2–6, in build-ready detail
 - [ARCHITECTURE.md](docs/ARCHITECTURE.md) — layering, conventions, and why the model is as small as it is
 - [PROTOCOL.md](docs/PROTOCOL.md) — the wire contract, frozen so the backend can be replaced
 - [SECURITY.md](docs/SECURITY.md) — credential handling and the risks that remain

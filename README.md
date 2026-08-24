@@ -238,6 +238,7 @@ bar would work in one mode and not the others), audio, recording, and WebTranspo
 
 ## Documentation
 
+- [STATUS.md](docs/STATUS.md) — what is built, what is not, and where to pick it up
 - [ROADMAP.md](docs/ROADMAP.md) — the plan for phases 2–6, in build-ready detail
 - [EXECUTION.md](docs/EXECUTION.md) — how it runs: architecture, flow, and what every file is for
 - [DEPLOYMENT.md](docs/DEPLOYMENT.md) — Docker and Fly.io, and why the host has to carry UDP

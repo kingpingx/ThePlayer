@@ -1,21 +1,33 @@
 # ThePlayer
 
-Play any RTSP feed or video file in Chrome — whatever codec it happens to be in — and choose
-**where the decoding happens**.
+A browser cannot play an RTSP camera. A browser also cannot, in almost every case, play H.265.
+ThePlayer solves both — and lets you choose **where the decoding happens**.
 
-Give it an address (`rtsp://user:pass@camera/stream`, or a path to a video file) and it plays in the
-browser. An H.265 feed plays in a browser that cannot decode H.265. A browser that *can* decode
-H.265 gets the original bytes untouched, and the server's conversion cost drops to zero.
+Give it an address (`rtsp://user:pass@camera/stream`, or a path to a video file) and it plays in
+Chrome, whatever codec it happens to be in. An H.265 feed plays in a browser that cannot decode
+H.265. A browser that *can* decode H.265 gets the original bytes untouched, and the server's
+conversion cost drops to zero.
 
-> **Status:** Phase 1 (`v0.2.0`) — first pixels. H.264 cameras and video files play in Chrome over
-> WebRTC, with one FFmpeg process shared by every viewer of the same stream. Other modes return
-> `501` naming the phase that delivers them. See [Roadmap](#roadmap).
+> **Status:** Phase 1 (`v0.2.0`) — first pixels. The transport half is done: H.264 cameras and
+> video files play in Chrome over WebRTC, with one FFmpeg process shared by every viewer of the
+> same stream. The codec half is not — H.265 needs conversion (Phase 3) or client-side decoding
+> (Phase 2), and until then an H.265 source returns `501` naming the phase that delivers it.
+> See [Roadmap](#roadmap).
 
 ---
 
 ## The idea
 
-Three pipelines, differing in how much codec work the **server** does:
+Two barriers stand between a camera and a `<video>` element, and they are often conflated:
+
+| | The problem | The fix |
+|---|---|---|
+| **Transport** | No browser speaks RTSP. | MediaMTX repackages the feed as WebRTC, or the server pushes frames down a WebSocket. |
+| **Codec** | Most browsers refuse H.265 — and over WebRTC they refuse it in SDP, before anything could intervene. | Either the server converts it, or the client decodes it itself through WebCodecs. |
+
+The transport problem has one answer, and Phase 1 delivered it. The codec problem has three, and
+they are what the rest of this project is about — they differ in how much codec work the **server**
+does:
 
 | | `ClientDecoded` | `ServerAssisted` | `ServerDecoded` |
 |---|---|---|---|
@@ -82,11 +94,16 @@ Paste an RTSP URL — credentials in the URL are fine — or a full path to a vi
 Play. The page shows what your browser can decode, what the stream turned out to be, and whether
 the server had to convert it.
 
-No camera to hand? Make one:
+No camera to hand? Make one of each:
 
 ```bash
+# H.264 - plays today
 ffmpeg -f lavfi -i "testsrc2=size=1280x720:rate=25:duration=30" \
-       -c:v libx264 -preset ultrafast -pix_fmt yuv420p -g 50 sample.mp4
+       -c:v libx264 -preset ultrafast -pix_fmt yuv420p -g 50 sample-h264.mp4
+
+# H.265 - the case this project exists for. Returns 501 until Phase 2/3 land.
+ffmpeg -f lavfi -i "testsrc2=size=1280x720:rate=25:duration=30" \
+       -c:v libx265 -preset ultrafast -pix_fmt yuv420p -g 50 -tag:v hvc1 sample-h265.mp4
 ```
 
 > The page at `/` is a deliberately minimal WHEP client, standing in until the Angular player is
@@ -156,7 +173,7 @@ faked in tests, or rewritten in Go without the use cases noticing.
 | `ThePlayer.Application` | Use cases and the ports Infrastructure must satisfy. |
 | `ThePlayer.Infrastructure` | FFmpeg, MediaMTX, sockets, OS counters. |
 | `ThePlayer.Api` | ASP.NET Core host. The only place DI is configured. |
-| `ThePlayer.Player` | Angular client *(Phase 1)*. |
+| `ThePlayer.Player` | Angular client *(Phase 2)*. |
 
 Two conventions worth knowing before reading the code:
 
@@ -195,8 +212,8 @@ other processes of the same user, and the server will connect to whatever addres
 |---|---|---|
 | ✅ 0 | Foundation — solution, `MediaAddress`, MediaMTX supervision, health, CI | `v0.1.0` |
 | ✅ 1 | First pixels — H.264 RTSP feeds and files play via WebRTC | `v0.2.0` |
-| 2 | Client-side decoding and the capability panel | `v0.3.0` |
-| 3 | H.265 conversion and hardware detection | `v0.4.0` |
+| 2 | Client-side decoding and the capability panel — **H.265 plays on browsers that can decode it** | `v0.3.0` |
+| 3 | H.265 conversion — **it plays everywhere**, converted only for clients that need it | `v0.4.0` |
 | 4 | Server CPU and GPU live in the browser | `v0.5.0` |
 | 5 | Full server decoding and the three-way comparison | `v0.6.0` |
 | 6 | Docker, auth, docs | `v1.0.0` |
@@ -210,6 +227,7 @@ bar would work in one mode and not the others), audio, recording, and WebTranspo
 ## Documentation
 
 - [ROADMAP.md](docs/ROADMAP.md) — the plan for phases 2–6, in build-ready detail
+- [EXECUTION.md](docs/EXECUTION.md) — how it runs: architecture, flow, and what every file is for
 - [ARCHITECTURE.md](docs/ARCHITECTURE.md) — layering, conventions, and why the model is as small as it is
 - [PROTOCOL.md](docs/PROTOCOL.md) — the wire contract, frozen so the backend can be replaced
 - [SECURITY.md](docs/SECURITY.md) — credential handling and the risks that remain

@@ -50,6 +50,18 @@ public static class Endpoints
             })
             .WithName("StopWatching");
 
+        // Not a minimal-API result: the handler upgrades the connection and then owns it for the
+        // life of the stream, so it writes to the response itself rather than returning one.
+        app.MapGet("/ws/frames/{viewerId}", (
+                string viewerId,
+                HttpContext context,
+                BroadcastCoordinator coordinator,
+                ILoggerFactory loggerFactory,
+                CancellationToken cancellationToken) =>
+            VideoStreamSocket.HandleAsync(context, viewerId, coordinator, loggerFactory, cancellationToken))
+            .WithName("StreamFrames")
+            .ExcludeFromDescription();
+
         app.MapGet("/api/broadcasts", async (
                 BroadcastCoordinator coordinator,
                 CancellationToken cancellationToken) =>

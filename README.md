@@ -8,11 +8,12 @@ Chrome, whatever codec it happens to be in. An H.265 feed plays in a browser tha
 H.265. A browser that *can* decode H.265 gets the original bytes untouched, and the server's
 conversion cost drops to zero.
 
-> **Status:** Phase 1 (`v0.2.0`) — first pixels. The transport half is done: H.264 cameras and
-> video files play in Chrome over WebRTC, with one FFmpeg process shared by every viewer of the
-> same stream. The codec half is not — H.265 needs conversion (Phase 3) or client-side decoding
-> (Phase 2), and until then an H.265 source returns `501` naming the phase that delivers it.
-> See [Roadmap](#roadmap).
+> **Status:** Phase 2 (`v0.3.0`) — client-side decoding. **H.265 now plays in a browser that can
+> decode it, with the server copying bytes and doing no codec work at all** — which is the whole
+> point of the project, and the first phase where you can see it. H.264 and H.265 both play over
+> WebRTC (`ServerAssisted`) or straight to WebCodecs over a socket (`ClientDecoded`). What is left
+> is conversion for browsers that *cannot* decode the source (Phase 3) and full server decoding
+> (Phase 5). See [Roadmap](#roadmap).
 
 ---
 
@@ -67,7 +68,7 @@ asserted.
 |---|---|---|
 | .NET SDK 8 | the backend | `dotnet --version` |
 | FFmpeg + ffprobe | all codec work | `ffmpeg -version` |
-| Node 22 LTS | the Angular player (Phase 1+) | `node --version` |
+| Node 22 LTS or newer | the Angular player | `node --version` |
 
 Node 20.9 and earlier will **not** work — no current Angular CLI accepts it (Angular 19 needs
 `≥ 20.11.1`, Angular 22 needs `≥ 22.22.3`).
@@ -86,8 +87,12 @@ winget install OpenJS.NodeJS.LTS
 # 2. Start the server - it launches and supervises MediaMTX itself
 dotnet run --project src/ThePlayer.Api
 
-# 3. Open the player
+# 3. Open the built-in WHEP harness
 #    http://localhost:5172
+
+# 4. Or run the Angular player, which is where client-side decoding lives
+cd src/ThePlayer.Player && npm install && npm start
+#    http://localhost:4200        proxies /api and /ws to 5172
 ```
 
 Paste an RTSP URL — credentials in the URL are fine — or a full path to a video file, and press
@@ -106,9 +111,10 @@ ffmpeg -f lavfi -i "testsrc2=size=1280x720:rate=25:duration=30" \
        -c:v libx265 -preset ultrafast -pix_fmt yuv420p -g 50 -tag:v hvc1 sample-h265.mp4
 ```
 
-> The page at `/` is a deliberately minimal WHEP client, standing in until the Angular player is
-> unblocked. Its handshake is what `server-assisted-player.component.ts` will do, so it is the
-> reference for that port rather than throwaway scaffolding.
+> The page at `/` is a deliberately minimal WHEP client. Its handshake is what
+> `server-assisted-player.component.ts` does, so it stays as the reference for that port and as a
+> dependency-free fallback — but it only speaks WebRTC. Client-side decoding needs the Angular
+> player.
 
 ### Check the server
 
@@ -146,7 +152,13 @@ by actually encoding a couple of frames with it, and only the ones that succeed 
 ```bash
 dotnet test                                              # everything
 dotnet test tests/ThePlayer.Architecture.Tests           # the dependency rule alone
+
+cd src/ThePlayer.Player && npm test                      # the player
 ```
+
+The infrastructure tests encode short H.264 and H.265 clips with FFmpeg as they start, so they need
+it on PATH — and they assert one access unit per picture against real encoder output rather than
+against synthetic data. That is what caught both of the frame-reader bugs fixed in Phase 2.
 
 ---
 
@@ -212,7 +224,7 @@ other processes of the same user, and the server will connect to whatever addres
 |---|---|---|
 | ✅ 0 | Foundation — solution, `MediaAddress`, MediaMTX supervision, health, CI | `v0.1.0` |
 | ✅ 1 | First pixels — H.264 RTSP feeds and files play via WebRTC | `v0.2.0` |
-| 2 | Client-side decoding and the capability panel — **H.265 plays on browsers that can decode it** | `v0.3.0` |
+| ✅ 2 | Client-side decoding and the capability panel — **H.265 plays on browsers that can decode it** | `v0.3.0` |
 | 3 | H.265 conversion — **it plays everywhere**, converted only for clients that need it | `v0.4.0` |
 | 4 | Server CPU and GPU live in the browser | `v0.5.0` |
 | 5 | Full server decoding and the three-way comparison | `v0.6.0` |

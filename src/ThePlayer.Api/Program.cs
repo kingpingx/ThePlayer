@@ -19,6 +19,10 @@ else
     app.UseExceptionHandler();
 }
 
+// The frame socket. KeepAliveInterval defaults to 30s, which is what stops an idle proxy from
+// dropping a connection that is streaming perfectly well.
+app.UseWebSockets();
+
 // Serves wwwroot/index.html - a minimal WHEP harness used to verify the backend in a real browser.
 // The Angular player replaces it as the primary client; this stays as a dependency-free fallback.
 app.UseDefaultFiles();

@@ -130,8 +130,28 @@ public sealed class Broadcast
         FailureReason = null;
     }
 
-    /// <summary>A file reaching its last frame. Not an error.</summary>
-    public void MarkEnded() => State = BroadcastState.Ended;
+    /// <summary>
+    /// A file reaching its last frame. Not an error.
+    /// </summary>
+    /// <remarks>
+    /// The linger countdown starts here even though viewers may still be attached, because there is
+    /// nothing left to deliver to them - they have already had everything there is. Without this a
+    /// broadcast whose pipeline has finished sits registered forever, and every later viewer joins
+    /// it and receives silence.
+    /// </remarks>
+    public void MarkEnded(DateTimeOffset now)
+    {
+        if (State == BroadcastState.Ended)
+        {
+            return;
+        }
+
+        State = BroadcastState.Ended;
+        EmptySince ??= now;
+    }
+
+    /// <summary>Whether this broadcast has nothing left to give a new viewer.</summary>
+    public bool IsFinished => State is BroadcastState.Ended or BroadcastState.Failed;
 
     public void MarkFailed(string reason)
     {

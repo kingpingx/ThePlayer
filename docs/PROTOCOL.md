@@ -15,11 +15,11 @@ Everything is JSON, camel-cased, over HTTP. Three transports:
 
 ---
 
-## Status: Phase 1
+## Status: Phase 2
 
-`GET /api/health`, `POST /api/watch`, `DELETE /api/watch/{viewerId}` and `GET /api/broadcasts`
-exist. The frame socket and the metrics stream are specified below as they will be built, so this
-document and the code stay in step rather than diverging.
+`GET /api/health`, `POST /api/watch`, `DELETE /api/watch/{viewerId}`, `GET /api/broadcasts` and
+`WS /ws/frames/{viewerId}` all exist. The metrics stream is specified below as it will be built, so
+this document and the code stay in step rather than diverging.
 
 ---
 
@@ -181,22 +181,38 @@ cannot become a dictionary key or appear in this listing.
 
 ---
 
-## Planned — Phase 2
+## `WS /ws/frames/{viewerId}`
 
-### `WS /ws/frames/{viewerId}`
+One JSON text message, then binary frames. Offered when `transport.kind` is `WebSocket`.
 
-One JSON text message, then binary frames.
+Resolved before the upgrade, so a viewer id that is unknown - or one watching a WebRTC mode - gets
+`404` rather than a socket that opens and immediately closes.
 
 ```jsonc
 // first message - configures VideoDecoder
 {
   "type": "init",
-  "codec": "hev1.1.6.L93.B0",     // RFC 6381
+  "codec": "hev1.1.6.L93.90",     // RFC 6381, derived from the stream's own parameter sets
   "width": 1920,
   "height": 1080,
   "frameRate": 25
 }
 ```
+
+Each binary message that follows carries a nine-byte header:
+
+```
+byte  0     flags        bit 0 = keyframe
+bytes 1-8   timestamp    microseconds, big-endian u64
+bytes 9+    payload      Annex-B access unit
+```
+
+Big-endian because that is what `DataView.getBigUint64` reads by default.
+
+The payload is Annex-B with start codes, and no `description` is sent - which is the form
+`VideoDecoder` expects when its config carries none. Parameter sets are inlined in front of every
+keyframe instead (`dump_extra=freq=keyframe`), so a client attaching mid-stream can configure a
+decoder at the next keyframe with no special handling.
 
 Each subsequent binary message is **one complete access unit** — never a partial frame, never two.
 Frame boundaries are found by asking FFmpeg to insert Access Unit Delimiters

@@ -1,3 +1,4 @@
+using System.Threading.Channels;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using ThePlayer.Domain.Broadcasting;
@@ -50,6 +51,18 @@ public sealed record WatchTicket(
     Uri? WhepUrl,
     string? FrameSocketPath);
 
+/// <summary>One viewer's attachment to a running frame pipeline.</summary>
+/// <param name="Initialisation">What the client needs to configure a decoder.</param>
+/// <param name="Frames">The queue to read from. Completes when the broadcast ends.</param>
+/// <param name="Release">Detaches this viewer from the pipeline.</param>
+public sealed record FrameSubscription(
+    StreamInitialisation Initialisation,
+    ChannelReader<EncodedFrame> Frames,
+    Action Release) : IDisposable
+{
+    public void Dispose() => Release();
+}
+
 /// <summary>
 /// Owns every running broadcast: starts one when the first viewer asks, hands later viewers the
 /// one already running, and stops it shortly after the last viewer leaves.
@@ -70,6 +83,7 @@ public sealed class BroadcastCoordinator(
     IMediaInspector inspector,
     IMediaServer mediaServer,
     IHardwareInspector hardwareInspector,
+    IFramePipeline framePipeline,
     BroadcastPlanner planner,
     IOptions<BroadcastOptions> options,
     TimeProvider clock,
@@ -77,12 +91,19 @@ public sealed class BroadcastCoordinator(
 {
     private readonly BroadcastOptions _options = options.Value;
 
-    /// <summary>Guards every field below. Held only for bookkeeping, never across an inspection.</summary>
+    /// <summary>Guards every field below. Held only for bookkeeping, never across I/O.</summary>
     private readonly SemaphoreSlim _gate = new(1, 1);
 
     private readonly Dictionary<string, Broadcast> _broadcasts = [];
     private readonly Dictionary<string, string> _viewerToBroadcast = [];
     private readonly Dictionary<string, CachedFormat> _formats = [];
+
+    /// <summary>
+    /// The frame pipelines, for the modes that deliver over a socket. Kept beside the broadcasts
+    /// rather than inside them so that <c>Broadcast</c> stays a Domain type with no idea that
+    /// channels or FFmpeg exist.
+    /// </summary>
+    private readonly Dictionary<string, FrameBroadcaster> _frameBroadcasters = [];
 
     private readonly record struct CachedFormat(VideoFormat Format, DateTimeOffset ExpiresAt);
 
@@ -107,29 +128,60 @@ public sealed class BroadcastCoordinator(
         var key = plan.KeyFor(address.Fingerprint);
         var viewerId = Guid.NewGuid().ToString("n")[..16];
 
+        // Fast path: something is already running for this exact plan.
+        FrameBroadcaster? finished = null;
+
         await _gate.WaitAsync(cancellationToken);
         try
         {
-            if (_broadcasts.TryGetValue(key, out var existing))
+            if (_broadcasts.TryGetValue(key, out var running))
             {
-                existing.Attach(viewerId, clock.GetUtcNow());
-                _viewerToBroadcast[viewerId] = key;
+                if (HasFinished(key, running))
+                {
+                    // A file that already played to its last frame. Watching it again means
+                    // starting it again, not joining a broadcast with nothing left to deliver.
+                    _broadcasts.Remove(key);
+                    _frameBroadcasters.Remove(key, out finished);
+                }
+                else
+                {
+                    return Join(running, viewerId, availability);
+                }
+            }
+        }
+        finally
+        {
+            _gate.Release();
+        }
 
-                logger.LogInformation(
-                    "Viewer {ViewerId} joined broadcast {Key} ({Count} watching).",
-                    viewerId,
-                    key,
-                    existing.ViewerCount);
+        await DiscardAsync(finished);
 
-                return TicketFor(existing, viewerId, availability);
+        // Starting a pipeline is I/O, and a frame pipeline waits for a keyframe before it can
+        // describe the stream - seconds, on a camera with a long GOP. Doing that under the lock
+        // would stall every other viewer in the system, so it happens outside and the race is
+        // settled afterwards.
+        var started = await StartPipelineAsync(key, address, plan, format, cancellationToken);
+
+        await _gate.WaitAsync(cancellationToken);
+        try
+        {
+            if (_broadcasts.TryGetValue(key, out var raced))
+            {
+                // Someone else finished first. Theirs is already registered and may already have
+                // viewers, so ours is the one that goes.
+                logger.LogDebug("Discarding a duplicate pipeline for {Key}; another viewer won.", key);
+                await DiscardAsync(started);
+
+                return Join(raced, viewerId, availability);
             }
 
             var broadcast = new Broadcast(key, address, format, plan, mediaServerPath: key);
-
-            // Publishing before the broadcast is visible means a viewer never sees a broadcast it
-            // cannot yet play. If this throws, nothing has been registered.
-            await mediaServer.PublishAsync(broadcast.MediaServerPath, address, cancellationToken);
             broadcast.MarkLive();
+
+            if (started is not null)
+            {
+                _frameBroadcasters[key] = started;
+            }
 
             broadcast.Attach(viewerId, clock.GetUtcNow());
             _broadcasts[key] = broadcast;
@@ -143,6 +195,83 @@ public sealed class BroadcastCoordinator(
                 plan.RequiresConversion);
 
             return TicketFor(broadcast, viewerId, availability);
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    /// <summary>
+    /// Brings a broadcast into being: published on the edge server for WebRTC, or a frame pipeline
+    /// of our own for the socket modes.
+    /// </summary>
+    /// <returns>The broadcaster to register, or <c>null</c> for the WebRTC path.</returns>
+    private async Task<FrameBroadcaster?> StartPipelineAsync(
+        string key,
+        MediaAddress address,
+        BroadcastPlan plan,
+        VideoFormat format,
+        CancellationToken cancellationToken)
+    {
+        if (plan.Mode == PlaybackMode.ServerAssisted)
+        {
+            // MediaMTX pulls the source itself and serves it over WebRTC; this process never sees
+            // a frame. Publishing is idempotent, so a lost race needs no undoing.
+            await mediaServer.PublishAsync(key, address, cancellationToken);
+            return null;
+        }
+
+        var stream = await framePipeline.StartAsync(address, plan, format, cancellationToken);
+        return new FrameBroadcaster(stream, key, logger);
+    }
+
+    private static async Task DiscardAsync(FrameBroadcaster? broadcaster)
+    {
+        if (broadcaster is not null)
+        {
+            await broadcaster.DisposeAsync();
+        }
+    }
+
+    private WatchTicket Join(Broadcast broadcast, string viewerId, IReadOnlyList<ModeAvailability> availability)
+    {
+        broadcast.Attach(viewerId, clock.GetUtcNow());
+        _viewerToBroadcast[viewerId] = broadcast.Key;
+
+        logger.LogInformation(
+            "Viewer {ViewerId} joined broadcast {Key} ({Count} watching).",
+            viewerId,
+            broadcast.Key,
+            broadcast.ViewerCount);
+
+        return TicketFor(broadcast, viewerId, availability);
+    }
+
+    /// <summary>
+    /// Attaches a viewer to the frame stream it was promised, for the socket modes.
+    /// </summary>
+    /// <returns>
+    /// The subscription, or <c>null</c> if this viewer id is unknown or is not on a socket mode -
+    /// which is the socket endpoint's cue to refuse the connection.
+    /// </returns>
+    public async Task<FrameSubscription?> SubscribeAsync(
+        string viewerId,
+        CancellationToken cancellationToken = default)
+    {
+        await _gate.WaitAsync(cancellationToken);
+        try
+        {
+            if (!_viewerToBroadcast.TryGetValue(viewerId, out var key) ||
+                !_frameBroadcasters.TryGetValue(key, out var broadcaster))
+            {
+                return null;
+            }
+
+            return new FrameSubscription(
+                broadcaster.Initialisation,
+                broadcaster.Subscribe(viewerId),
+                () => broadcaster.Unsubscribe(viewerId));
         }
         finally
         {
@@ -167,6 +296,11 @@ public sealed class BroadcastCoordinator(
                 return;
             }
 
+            if (_frameBroadcasters.TryGetValue(key, out var broadcaster))
+            {
+                broadcaster.Unsubscribe(viewerId);
+            }
+
             if (broadcast.Detach(viewerId, clock.GetUtcNow()))
             {
                 logger.LogInformation(
@@ -189,10 +323,22 @@ public sealed class BroadcastCoordinator(
     {
         var now = clock.GetUtcNow();
         List<Broadcast> expired;
+        var pipelines = new List<FrameBroadcaster>();
 
         await _gate.WaitAsync(cancellationToken);
         try
         {
+            // A pipeline that ran out of frames - a file reaching its last one. The broadcast is
+            // still registered and still has viewers, but there is nothing more to send, so its
+            // countdown starts here rather than waiting for viewers that may never detach.
+            foreach (var (key, broadcaster) in _frameBroadcasters)
+            {
+                if (broadcaster.HasEnded && _broadcasts.TryGetValue(key, out var ended))
+                {
+                    ended.MarkEnded(now);
+                }
+            }
+
             expired = _broadcasts.Values
                 .Where(broadcast => broadcast.ShouldStop(now, _options.Linger))
                 .ToList();
@@ -200,6 +346,11 @@ public sealed class BroadcastCoordinator(
             foreach (var broadcast in expired)
             {
                 _broadcasts.Remove(broadcast.Key);
+
+                if (_frameBroadcasters.Remove(broadcast.Key, out var broadcaster))
+                {
+                    pipelines.Add(broadcaster);
+                }
             }
 
             foreach (var expiredKey in _formats
@@ -215,19 +366,35 @@ public sealed class BroadcastCoordinator(
             _gate.Release();
         }
 
-        // Unpublishing is I/O, so it happens outside the lock. The broadcasts are already
+        // Tearing down is I/O, so it happens outside the lock. The broadcasts are already
         // unreachable, so nothing can attach to them in the meantime.
-        foreach (var broadcast in expired)
+        foreach (var broadcaster in pipelines)
+        {
+            try
+            {
+                await broadcaster.DisposeAsync();
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "Could not stop a frame pipeline cleanly.");
+            }
+        }
+
+        foreach (var broadcast in expired.Where(b => b.Plan.Mode == PlaybackMode.ServerAssisted))
         {
             try
             {
                 await mediaServer.RemoveAsync(broadcast.MediaServerPath, cancellationToken);
-                logger.LogInformation("Stopped broadcast {Key}.", broadcast.Key);
             }
             catch (Exception ex)
             {
                 logger.LogWarning(ex, "Could not unpublish {Key}.", broadcast.Key);
             }
+        }
+
+        foreach (var broadcast in expired)
+        {
+            logger.LogInformation("Stopped broadcast {Key}.", broadcast.Key);
         }
     }
 
@@ -244,6 +411,17 @@ public sealed class BroadcastCoordinator(
             _gate.Release();
         }
     }
+
+    /// <summary>
+    /// Whether a registered broadcast has nothing left to give. Called under the lock.
+    /// </summary>
+    /// <remarks>
+    /// Checks the pipeline as well as the recorded state, because the sweep is what transcribes one
+    /// into the other and a viewer can arrive between two sweeps.
+    /// </remarks>
+    private bool HasFinished(string key, Broadcast broadcast) =>
+        broadcast.IsFinished ||
+        (_frameBroadcasters.TryGetValue(key, out var broadcaster) && broadcaster.HasEnded);
 
     private async Task<VideoFormat> GetFormatAsync(MediaAddress address, CancellationToken cancellationToken)
     {
@@ -297,24 +475,27 @@ public sealed class BroadcastCoordinator(
                 : $"/ws/frames/{viewerId}");
 
     /// <summary>
-    /// Phase 1 delivers WebRTC passthrough only. Rejecting a plan we cannot execute - loudly, with
-    /// the phase named - beats letting a viewer attach to a pipeline that will never produce a
-    /// frame.
+    /// Rejects a plan this phase cannot execute - loudly, with the phase named - rather than
+    /// letting a viewer attach to a pipeline that will never produce a frame.
     /// </summary>
+    /// <remarks>
+    /// Phase 2 added the frame socket, so client-side decoding of a stream the browser already
+    /// understands now works. What remains is conversion (Phase 3) and full server decoding
+    /// (Phase 5).
+    /// </remarks>
     private static void RejectIfNotYetImplemented(BroadcastPlan plan)
     {
-        if (plan.Mode != PlaybackMode.ServerAssisted)
+        if (plan.Mode == PlaybackMode.ServerDecoded)
         {
             throw new NotSupportedException(
-                $"{plan.Mode} is not implemented yet. Client-side decoding arrives in Phase 2 and " +
-                "full server decoding in Phase 5. Use ServerAssisted for now.");
+                "Full server decoding arrives in Phase 5. Use ClientDecoded or ServerAssisted for now.");
         }
 
         if (plan.RequiresConversion)
         {
             throw new NotSupportedException(
-                "This stream needs converting to H.264 before a browser can play it, and " +
-                "conversion arrives in Phase 3. An H.264 source plays today.");
+                "This stream has to be converted before this client can play it, and conversion " +
+                "arrives in Phase 3. A source your browser can already decode plays today.");
         }
     }
 }

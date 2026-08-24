@@ -28,8 +28,9 @@ appearing in a browser, and which file to open when you want to change something
 
 Three programs are involved, and it is worth being clear about which does what:
 
-- **`ThePlayer.Api`** — an ASP.NET Core app. It **decides and coordinates**. It never touches a video
-  frame.
+- **`ThePlayer.Api`** — an ASP.NET Core app. It **decides and coordinates**. On the WebRTC path it
+  never touches a video frame; on the frame-socket path it splits FFmpeg's output into pictures and
+  fans them out, but still does no codec work.
 - **MediaMTX** — a Go media server, launched and supervised as a child process. It does the
   RTSP → WebRTC repackaging.
 - **FFmpeg / ffprobe** — invoked as short-lived child processes. All codec work happens here.
@@ -57,7 +58,8 @@ then stepped aside.
 
 | Port | Who listens | For |
 |---|---|---|
-| `5172` | ThePlayer.Api | REST + the WHEP harness at `/` |
+| `5172` | ThePlayer.Api | REST, the frame socket, and the WHEP harness at `/` |
+| `4200` | Angular dev server | The player during development, proxying `/api` and `/ws` to 5172 |
 | `8554` | MediaMTX | RTSP — where a file is pushed in |
 | `8889` | MediaMTX | WebRTC signalling (WHEP) |
 | `8189/udp` | MediaMTX | WebRTC media |
@@ -105,6 +107,7 @@ Four interfaces cross a process or platform boundary. Each has exactly one imple
   IHardwareInspector       ◀────────  FFmpegInspectors.cs        ffmpeg -encoders, then a real probe
   IMediaServer             ◀────────  MediaMtxPaths.cs           control API: publish / remove
   IMediaServerSupervisor   ◀────────  MediaMtxServer.cs          owns the child process
+  IFramePipeline           ◀────────  FFmpegStreamingPipeline.cs  long-lived ffmpeg -> frames
 ```
 
 Everything else — `BroadcastPlanner`, `BroadcastCoordinator`, `HealthReporter`, `BroadcastSweeper` —
@@ -185,7 +188,37 @@ Six paths. Every step names the file that performs it.
 
 From step 17 onward the API is idle. Media flows MediaMTX → browser over UDP 8189.
 
-### 2.3 How broadcasts are shared
+### 2.3 Playback — the frame socket
+
+The other way video reaches a browser, and the one the project exists for. Nothing here goes through
+MediaMTX: FFmpeg's stdout is read in-process, split into pictures, and fanned out.
+
+```
+ client-decoded-player   VideoStreamSocket   FrameBroadcaster   FFmpegStreamingPipeline   ffmpeg
+        │                       │                   │                     │                  │
+        │ GET /ws/frames/{id}   │                   │                     │                  │
+        ├──────────────────────▶│ Subscribe ───────▶│                     │                  │
+        │◀── init (JSON text) ──┤                   │◀── FramesAsync ─────┤◀── stdout ───────┤
+        │◀── binary frame ──────┤◀── channel ───────┤                     │                  │
+        │  VideoDecoder.decode  │                   │  bounded, drop-oldest, per viewer       │
+        │  → drawImage → close  │                   │                                        │
+```
+
+| # | File | What happens |
+|---|---|---|
+| 1 | [`Endpoints.cs`](../src/ThePlayer.Api/Endpoints.cs) | `GET /ws/frames/{viewerId}` — the one route that is not a minimal-API result, because the handler owns the connection for the life of the stream |
+| 2 | [`VideoStreamSocket.cs`](../src/ThePlayer.Api/VideoStreamSocket.cs) | Resolves the subscription **before** the upgrade, so an unknown viewer gets `404` rather than a socket that opens and immediately closes |
+| 3 | `BroadcastCoordinator.SubscribeAsync` | Finds the broadcaster for this viewer's broadcast and attaches a queue to it |
+| 4 | [`FrameBroadcaster.cs`](../src/ThePlayer.Application/Broadcasting/FrameBroadcaster.cs) `Subscribe` | A bounded channel, `DropOldest`, starting **out of sync** — a viewer attaching mid-stream cannot decode until the next keyframe |
+| 5 | [`FFmpegStreamingPipeline.cs`](../src/ThePlayer.Infrastructure/FFmpeg/FFmpegStreamingPipeline.cs) | `-c:v copy -bsf:v h264_metadata=aud=insert,dump_extra=freq=keyframe -f h264 -`. `dump_extra` is not optional: copying from an MP4 leaves parameter sets in the `avcC` box, and WebCodecs cannot configure a decoder without them |
+| 6 | [`FrameReaders.cs`](../src/ThePlayer.Infrastructure/FFmpeg/FrameReaders.cs) | Splits the byte stream on access unit delimiters. Handles **both** start-code lengths — the delimiter uses four bytes while the slices use three, in the same stream |
+| 7 | [`CodecStringBuilder.cs`](../src/ThePlayer.Infrastructure/FFmpeg/CodecStringBuilder.cs) | Derives the RFC 6381 string from the stream's own SPS. Fails loudly rather than guessing |
+| 8 | `VideoStreamSocket.SendInitialisationAsync` | One JSON text message, then one binary message per picture: flags byte, big-endian microsecond timestamp, Annex-B payload |
+| 9 | `FrameBroadcaster.Deliver` | A viewer that fills its queue is marked out of sync, skipped to the next keyframe, and its queue emptied — so it resumes at the live edge and never stalls the pipeline feeding everyone else |
+| 10 | `client-decoded-player.component.ts` | `VideoDecoder.decode` → `drawImage` → **`frame.close()` in a `finally`**. A `VideoFrame` holds GPU memory and is not garbage collected; a missed close leaks until the decoder stalls silently |
+| 11 | `VideoStreamSocket.HandleAsync` `finally` | The socket closing detaches the viewer. `DELETE /api/watch` usually lands, but "usually" would leave a viewer pinned to a broadcast that then never empties and never stops |
+
+### 2.4 How broadcasts are shared
 
 The key is what decides whether two viewers share one FFmpeg process:
 
@@ -202,7 +235,7 @@ Two viewers wanting the same bytes share one pipeline. Two clients needing *diff
 their own pipelines from the same upstream — which is exactly right, and falls out of the key rather
 than needing any special handling.
 
-### 2.4 Teardown
+### 2.5 Teardown
 
 ```
    last viewer leaves                     BroadcastSweeper ticks every 2s
@@ -228,7 +261,7 @@ The linger window is the point of the whole path: without it, a page refresh tea
 process and immediately rebuilds it, costing a reconnection to the camera and several seconds of
 black screen.
 
-### 2.5 Health
+### 2.6 Health
 
 | # | File | What happens |
 |---|---|---|
@@ -241,7 +274,7 @@ black screen.
 Hardware acceleration is deliberately **not** a health input. A machine that can only encode with
 libx264 still plays video, and reporting it unhealthy would page someone for nothing.
 
-### 2.6 When it fails
+### 2.7 When it fails
 
 | Status | Raised by | When |
 |---|---|---|
@@ -286,6 +319,7 @@ In dependency order. The last column is the thing worth knowing that the filenam
 | [`Broadcasting/Broadcast.cs`](../src/ThePlayer.Domain/Broadcasting/Broadcast.cs) | 165 | `BroadcastState` · `BroadcastPlan` (+ `KeyFor`) · the live `Broadcast` | Not thread-safe on its own; `BroadcastCoordinator` owns every instance and serialises access. Viewers are held as bare ids because everyone attached shares the plan by definition |
 | [`Hardware/AccelerationProfile.cs`](../src/ThePlayer.Domain/Hardware/AccelerationProfile.cs) | 86 | `AccelerationKind` · `AccelerationProfile` · `HardwareCapabilities` | `Known` is a **catalogue of knowledge, not a detection result** — it says what each engine *would* be called if present. Software sits at `Preference: 99` and is what makes "there is always a fallback" true |
 | [`Monitoring/SystemHealth.cs`](../src/ThePlayer.Domain/Monitoring/SystemHealth.cs) | 62 | `MediaServerState` · `MediaServerStatus` · `SystemHealth` | `RestartCount` exists so a flapping server is visible while `State` still reads `Running` |
+| [`Media/EncodedFrame.cs`](../src/ThePlayer.Domain/Media/EncodedFrame.cs) | 50 | `EncodedFrame` · `StreamInitialisation` | The payload is `ReadOnlyMemory<byte>` rather than an array because one frame is fanned out to every viewer at once, and nothing may mutate it |
 
 ### `ThePlayer.Application` — use cases and the ports
 
@@ -295,6 +329,7 @@ In dependency order. The last column is the thing worth knowing that the filenam
 | [`Broadcasting/BroadcastPlanner.cs`](../src/ThePlayer.Application/Broadcasting/BroadcastPlanner.cs) | 149 | The negotiation table: what the server will do to a stream, and which modes can be offered | `WebRtcSafeCodec = H264` is the single constant encoding the whole "browsers refuse H.265 in SDP" judgement. Pure — no I/O, no state, nothing injected |
 | [`Broadcasting/BroadcastCoordinator.cs`](../src/ThePlayer.Application/Broadcasting/BroadcastCoordinator.cs) | 320 | `BroadcastOptions` · `WatchTicket` · the registry of everything live | One `SemaphoreSlim` guards three dictionaries, and is held for bookkeeping only — never across an inspection or a publish |
 | [`Monitoring/HealthReporter.cs`](../src/ThePlayer.Application/Monitoring/HealthReporter.cs) | 24 | Assembles `/api/health` | Concrete rather than a port: it performs no I/O of its own, it only composes two ports that do |
+| [`Broadcasting/FrameBroadcaster.cs`](../src/ThePlayer.Application/Broadcasting/FrameBroadcaster.cs) | 196 | One pipeline fanned out to many viewers | The backpressure rule lives in `Deliver`: fill your queue and you are skipped to the next keyframe with your queue emptied. Losing frames is survivable; rendering from a broken reference chain is not |
 
 ### `ThePlayer.Infrastructure` — external processes and OS specifics
 
@@ -305,6 +340,9 @@ In dependency order. The last column is the thing worth knowing that the filenam
 | [`FFmpeg/FFmpegMediaInspector.cs`](../src/ThePlayer.Infrastructure/FFmpeg/FFmpegMediaInspector.cs) | 250 | `IMediaInspector` — what this *stream* is | Prefers `avg_frame_rate` over `r_frame_rate`, because the latter is the container's nominal rate and can be wildly optimistic on a variable-rate camera — and Phase 2 synthesises timestamps from this number. An RTSP address is always treated as live regardless of any duration it reports |
 | [`MediaServer/MediaMtxPaths.cs`](../src/ThePlayer.Infrastructure/MediaServer/MediaMtxPaths.cs) | 143 | `IMediaServer` — registers paths over the control API | The failure body echoes the configuration just sent, which for a camera contains the password — so it is scrubbed before it becomes an exception message. `RemoveAsync` never fails the caller: removal is cleanup |
 | [`MediaServer/MediaMtxServer.cs`](../src/ThePlayer.Infrastructure/MediaServer/MediaMtxServer.cs) | 457 | `MediaMtxOptions` + `MediaMtxSupervisor` | The largest file in the repo; [§2.1](#21--startup-dotnet-run) is its walkthrough. `Supervise: false` switches it to monitor-only, for when MediaMTX runs in a container or by hand |
+| [`FFmpeg/FrameReaders.cs`](../src/ThePlayer.Infrastructure/FFmpeg/FrameReaders.cs) | 300 | `ReadFrame` · `IFrameReader` · `CompressedFrameReader` | Two bugs lived here and both needed real encoder output to find: parameter sets arriving before the first delimiter are not a picture of their own, and a rescan resuming *inside* a four-byte start code finds a phantom three-byte one |
+| [`FFmpeg/CodecStringBuilder.cs`](../src/ThePlayer.Infrastructure/FFmpeg/CodecStringBuilder.cs) | 210 | RFC 6381 strings from parameter sets | H.264 is three bytes copied out. H.265 needs a bit reader, emulation-prevention stripping, and the 32 compatibility flags reversed — `0x60000000` becomes `6` |
+| [`FFmpeg/FFmpegStreamingPipeline.cs`](../src/ThePlayer.Infrastructure/FFmpeg/FFmpegStreamingPipeline.cs) | 300 | `IFramePipeline` + `FFmpegFrameStream` | `StartAsync` returns only once parameter sets have arrived, buffering what it read while waiting. On Windows with a Chocolatey FFmpeg the spawned process is a *shim* whose real ffmpeg is its child, which is why `Kill(entireProcessTree: true)` is load-bearing |
 
 ### `ThePlayer.Api` — the host
 
@@ -315,6 +353,7 @@ In dependency order. The last column is the thing worth knowing that the filenam
 | [`Endpoints.cs`](../src/ThePlayer.Api/Endpoints.cs) | 198 | The four endpoints and the mapping to and from `Contracts.cs` | Translation only — no orchestration, no decisions. The exception→status table lives here, and `ToSummary` returns `Address.Display`, never the raw address |
 | [`Contracts.cs`](../src/ThePlayer.Api/Contracts.cs) | 108 | The wire DTOs | Separate from Domain so an internal rename is not a breaking API change. `[JsonPropertyName("ffmpegVersion")]` is explicit because the default camel-case policy turns `FFmpegVersion` into `fFmpegVersion` |
 | [`BroadcastSweeper.cs`](../src/ThePlayer.Api/BroadcastSweeper.cs) | 56 | The 2 s timer driving `SweepAsync` | The timer lives here rather than inside the coordinator so tests can advance a fake clock and call the sweep directly, instead of waiting on wall time |
+| [`VideoStreamSocket.cs`](../src/ThePlayer.Api/VideoStreamSocket.cs) | 235 | `WS /ws/frames/{viewerId}` | Reads from the socket it never sends to, purely to notice when the client goes away — a send to a half-open socket can otherwise block indefinitely |
 | [`wwwroot/index.html`](../src/ThePlayer.Api/wwwroot/index.html) | 256 | A dependency-free WHEP client: capability probe, watch call, handshake, teardown | Not throwaway scaffolding — its handshake is what `server-assisted-player.component.ts` will do, so it is the **reference** for that port, and stays afterwards as a fallback |
 | `appsettings*.json` | — | Base + Development / Staging / Production | Every timeout, port and linger value in this document is here |
 | `Properties/launchSettings.json` | — | Dev profiles | `http` → 5172, `https` → 7035 + 5172 |
@@ -328,10 +367,24 @@ In dependency order. The last column is the thing worth knowing that the filenam
 | [`ThePlayer.Architecture.Tests`](../tests/ThePlayer.Architecture.Tests) | unit | no | The dependency rule itself, via NetArchTest. The only project allowed to reference all four layers — and it fails with the *names* of offending types, because "the architecture test failed" is a frustrating thing to be handed by CI |
 | [`ThePlayer.Infrastructure.Tests`](../tests/ThePlayer.Infrastructure.Tests) | integration | **yes** | Frame readers, argument building, metrics parsing |
 | [`ThePlayer.Api.Tests`](../tests/ThePlayer.Api.Tests) | integration | no | Endpoints over real HTTP with the two outward-facing ports faked — which is the point, not a shortcut: it lets the tests assert what happens when MediaMTX is **broken** |
-| [`ThePlayer.TestSupport`](../tests/ThePlayer.TestSupport) | library | — | Builders and fixtures. Sets `IsTestProject=false`, or `dotnet test` tries to run it as a test project and reports a confusing "testhost process exited" alongside the real results |
+| [`ThePlayer.TestSupport`](../tests/ThePlayer.TestSupport) | library | — | `GeneratedMedia` encodes short H.264 and H.265 clips with FFmpeg at run time. Sets `IsTestProject=false`, or `dotnet test` tries to run it as a test project and reports a confusing "testhost process exited" alongside the real results |
 
 Test media is generated by FFmpeg at test time rather than committed, so CI needs no camera and no
 binary assets.
+
+### `ThePlayer.Player` — the Angular client
+
+| Path | What it is | Worth knowing |
+|---|---|---|
+| `src/app/core/models.ts` | The protocol types | Written against `docs/PROTOCOL.md` rather than generated from the C#, deliberately: these are what must survive the backend being rewritten in Go |
+| `src/app/core/client-capabilities.service.ts` | Wraps `VideoDecoder` | The seam exists for tests: a fake can present a browser that decodes H.265, one that does not, one software-only, and one with no WebCodecs. None of that is reachable through the real API |
+| `src/app/core/watch.service.ts` | `POST /api/watch`, `DELETE` on teardown | Owns the viewer id, because the one thing that must not be forgotten is the detach |
+| `src/app/core/playback-stats.service.ts` | fps, decode time, dropped, queue depth | `queueDepth` is what makes a leaked `VideoFrame` visible before the decoder stalls |
+| `src/app/features/video-player/client-decoded-player.component.ts` | WebCodecs → `<canvas>` | The `finally { frame.close() }` is the single most important line in the client |
+| `src/app/features/video-player/server-assisted-player.component.ts` | WebRTC → `<video>` | A port of the WHEP harness, which stays as the dependency-free fallback |
+| `src/app/features/video-player/decode-mode-toggle.component.ts` | Picks the mode | Unavailable options show the server's sentence rather than going quietly dead |
+| `src/app/features/capability-panel/capability-panel.component.ts` | What this browser can decode | One half of the trade; Phase 4 adds the server half |
+| `proxy.conf.json` | `/api` and `/ws` → 5172 | `"ws": true` on the second, or the frame socket does not upgrade through the dev server |
 
 ### Tooling and CI
 
@@ -351,15 +404,15 @@ these currently appears exactly once in the tree, at its own declaration:
 
 | Member | File | Waiting on |
 |---|---|---|
-| `Broadcast.MarkEnded` | `Broadcasting/Broadcast.cs` | Phase 5 — a file reaching its last frame moves the broadcast to `Ended` |
 | `Broadcast.MarkFailed` | `Broadcasting/Broadcast.cs` | Phase 3+ — a pipeline that dies mid-stream |
-| `Broadcast.IsPlayable` | `Broadcasting/Broadcast.cs` | Phase 2 — the frame socket refusing a broadcast that is not yet `Live` |
-| `Broadcast.HasViewer` | `Broadcasting/Broadcast.cs` | Phase 2 — authorising a frame socket against its viewer id |
-| `ClientDecodeSupport.CanDecodeInHardware` | `Playback/PlaybackMode.cs` | Phase 2 — the capability panel distinguishing hardware from software support |
-| `VideoCodecNames.ToProbeString` | `Media/VideoFormat.cs` | Phase 2 — server-side capability probing |
+| `Broadcast.IsPlayable` | `Broadcasting/Broadcast.cs` | Unused: the socket resolves a *subscription*, not a broadcast state |
+| `Broadcast.HasViewer` | `Broadcasting/Broadcast.cs` | Unused: the coordinator authorises through `_viewerToBroadcast` instead |
+| `ClientDecodeSupport.CanDecodeInHardware` | `Playback/PlaybackMode.cs` | Unused server-side — the *client* makes this distinction, in `capability-panel` |
+| `VideoCodecNames.ToProbeString` | `Media/VideoFormat.cs` | Unused server-side — the probe strings live in `client-capabilities.service.ts`, where the probing happens |
 
-`BroadcastState.Ended` is likewise only ever declared, for the same reason as `MarkEnded`. And
-`Broadcast.Attach` takes a `now` parameter it does not currently use — `EmptySince` is simply
-cleared; the parameter is there for symmetry with `Detach`.
+`Broadcast.MarkEnded` and `BroadcastState.Ended` were on this list until Phase 2 and are now wired
+up: the sweep transcribes a pipeline that ran out into an ended broadcast, which starts its linger
+countdown even with viewers still attached. `Broadcast.Attach` still takes a `now` parameter it does
+not use — `EmptySince` is simply cleared; the parameter is there for symmetry with `Detach`.
 
 Everything else in the repository is on a live code path today.

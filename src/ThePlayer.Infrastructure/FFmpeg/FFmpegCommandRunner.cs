@@ -31,6 +31,17 @@ public sealed class FFmpegOptions
     public TimeSpan RtspConnectTimeout { get; set; } = TimeSpan.FromSeconds(6);
 
     /// <summary>
+    /// How long a streaming pipeline may take to produce its first decodable frame.
+    /// <para>
+    /// Separate from <see cref="CommandTimeout"/> because it bounds something different: not how
+    /// long a command may run, but how long to wait for a stream to describe itself. A camera with
+    /// a long GOP does not emit parameter sets until its next keyframe, so this has to allow for a
+    /// keyframe interval rather than a round trip.
+    /// </para>
+    /// </summary>
+    public TimeSpan PipelineStartTimeout { get; set; } = TimeSpan.FromSeconds(20);
+
+    /// <summary>
     /// Whether to confirm each hardware encoder by actually encoding a frame with it at startup.
     /// <para>
     /// On by default, and worth the second or so it costs. An FFmpeg build lists every encoder it

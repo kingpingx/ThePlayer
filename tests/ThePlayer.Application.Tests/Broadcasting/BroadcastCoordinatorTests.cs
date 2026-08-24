@@ -3,6 +3,7 @@ using Microsoft.Extensions.Options;
 using Microsoft.Extensions.Time.Testing;
 using NSubstitute;
 using ThePlayer.Application.Broadcasting;
+using ThePlayer.Domain.Broadcasting;
 using ThePlayer.Domain.Hardware;
 using ThePlayer.Domain.Media;
 using ThePlayer.Domain.Playback;
@@ -26,6 +27,7 @@ public class BroadcastCoordinatorTests
     private readonly IMediaInspector _inspector = Substitute.For<IMediaInspector>();
     private readonly IMediaServer _mediaServer = Substitute.For<IMediaServer>();
     private readonly IHardwareInspector _hardware = Substitute.For<IHardwareInspector>();
+    private readonly IFramePipeline _framePipeline = Substitute.For<IFramePipeline>();
     private readonly FakeTimeProvider _clock = new(DateTimeOffset.Parse("2026-01-01T00:00:00Z"));
 
     private readonly BroadcastCoordinator _coordinator;
@@ -41,14 +43,41 @@ public class BroadcastCoordinatorTests
         _mediaServer.WhepUrlFor(Arg.Any<string>())
             .Returns(callInfo => new Uri($"http://localhost:8889/{callInfo.Arg<string>()}/whep"));
 
+        _framePipeline.StartAsync(
+                Arg.Any<MediaAddress>(),
+                Arg.Any<BroadcastPlan>(),
+                Arg.Any<VideoFormat>(),
+                Arg.Any<CancellationToken>())
+            .Returns(_ => new SilentFrameStream());
+
         _coordinator = new BroadcastCoordinator(
             _inspector,
             _mediaServer,
             _hardware,
+            _framePipeline,
             new BroadcastPlanner(),
             Options.Create(new BroadcastOptions { Linger = Linger }),
             _clock,
             NullLogger<BroadcastCoordinator>.Instance);
+    }
+
+    /// <summary>
+    /// A pipeline that starts cleanly and then produces nothing. The coordinator's job is
+    /// reference counting, not decoding, so a stream that never yields keeps these tests about
+    /// lifetime rather than about frames.
+    /// </summary>
+    private sealed class SilentFrameStream : IFrameStream
+    {
+        public StreamInitialisation Initialisation { get; } = new("avc1.42c01f", 1920, 1080, 25);
+
+        public async IAsyncEnumerable<EncodedFrame> FramesAsync(
+            [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
+        {
+            await Task.CompletedTask;
+            yield break;
+        }
+
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
 
     private static MediaAddress Address(string path = H264File) =>
@@ -232,7 +261,6 @@ public class BroadcastCoordinatorTests
     public class PhaseLimits : BroadcastCoordinatorTests
     {
         [Theory]
-        [InlineData(PlaybackMode.ClientDecoded)]
         [InlineData(PlaybackMode.ServerDecoded)]
         public async Task Modes_that_are_not_built_yet_say_so_rather_than_failing_obscurely(PlaybackMode mode)
         {
@@ -247,6 +275,98 @@ public class BroadcastCoordinatorTests
 
             (await act.Should().ThrowAsync<NotSupportedException>())
                 .Which.Message.Should().Contain("Phase");
+        }
+
+        [Fact]
+        public async Task Client_side_decoding_of_a_stream_the_browser_understands_works()
+        {
+            // Phase 2. The browser decodes H.264 itself, so the server copies bytes and hands back
+            // a socket to read them from rather than a WHEP URL.
+            var capable = new ClientDecodeSupport(
+                WebCodecsAvailable: true,
+                [new CodecSupport(VideoCodec.H264, Supported: true, HardwareAccelerated: true)]);
+
+            var ticket = await _coordinator.AttachAsync(Address(), PlaybackMode.ClientDecoded, capable);
+
+            ticket.Converted.Should().BeFalse("the browser can already decode this codec");
+            ticket.FrameSocketPath.Should().Be($"/ws/frames/{ticket.ViewerId}");
+            ticket.WhepUrl.Should().BeNull("client-side decoding does not go through the edge server");
+
+            await _mediaServer.DidNotReceive().PublishAsync(
+                Arg.Any<string>(), Arg.Any<MediaAddress>(), Arg.Any<CancellationToken>());
+        }
+
+        [Fact]
+        public async Task A_file_that_played_to_the_end_is_restarted_rather_than_joined()
+        {
+            // The pipeline for a file stops when the file does. Watching it again has to start it
+            // again - joining the finished broadcast would hand the second viewer a stream that
+            // never produces a frame, which looks exactly like a hang.
+            var capable = Capable();
+
+            var first = await _coordinator.AttachAsync(Address(), PlaybackMode.ClientDecoded, capable);
+            await WaitForPipelineToEndAsync();
+
+            var second = await _coordinator.AttachAsync(Address(), PlaybackMode.ClientDecoded, capable);
+
+            second.ViewerId.Should().NotBe(first.ViewerId);
+
+            await _framePipeline.Received(2).StartAsync(
+                Arg.Any<MediaAddress>(),
+                Arg.Any<BroadcastPlan>(),
+                Arg.Any<VideoFormat>(),
+                Arg.Any<CancellationToken>());
+        }
+
+        [Fact]
+        public async Task A_finished_pipeline_is_swept_even_though_a_viewer_never_detached()
+        {
+            // A client that dies without detaching used to pin its broadcast forever: viewers never
+            // reached zero, so the linger countdown never started and the dead broadcast went on
+            // being handed to everyone who asked for the same thing.
+            await _coordinator.AttachAsync(Address(), PlaybackMode.ClientDecoded, Capable());
+            await WaitForPipelineToEndAsync();
+
+            // No detach at all. The sweep notices the pipeline ran out and starts the countdown.
+            await _coordinator.SweepAsync();
+            _clock.Advance(Linger + TimeSpan.FromSeconds(1));
+            await _coordinator.SweepAsync();
+
+            (await _coordinator.ListAsync()).Should().BeEmpty();
+        }
+
+        private static ClientDecodeSupport Capable() => new(
+            WebCodecsAvailable: true,
+            [new CodecSupport(VideoCodec.H264, Supported: true, HardwareAccelerated: true)]);
+
+        /// <summary>
+        /// The fake stream yields nothing, so its pump finishes almost at once - but "almost" is
+        /// not "before the next line", and asserting on a race is how a suite starts flaking.
+        /// </summary>
+        private async Task WaitForPipelineToEndAsync()
+        {
+            for (var attempt = 0; attempt < 100; attempt++)
+            {
+                await _coordinator.SweepAsync();
+
+                var live = await _coordinator.ListAsync();
+                if (live.Count == 0 || live[0].State == BroadcastState.Ended)
+                {
+                    return;
+                }
+
+                await Task.Delay(10);
+            }
+
+            throw new InvalidOperationException("The fake pipeline never reported that it had ended.");
+        }
+
+        [Fact]
+        public async Task A_frame_socket_is_only_offered_to_a_viewer_that_asked_for_one()
+        {
+            var subscription = await _coordinator.SubscribeAsync("nobody");
+
+            subscription.Should().BeNull("an unknown viewer id must not open a stream");
         }
 
         [Fact]

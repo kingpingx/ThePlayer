@@ -1,0 +1,77 @@
+<main class="shell">
+  <header>
+    <h1>ThePlayer</h1>
+    <p class="tagline">
+      Any RTSP feed or video file, in the browser — and you choose where the decoding happens.
+    </p>
+  </header>
+
+  <app-address-bar
+    [busy]="busy()"
+    [playing]="watch() !== null"
+    (play)="onPlay($event)"
+    (stopped)="onStop()" />
+
+  @if (error(); as failure) {
+    <div class="banner bad">
+      <b>{{ failure.title }}</b>
+      <span>{{ failure.detail }}</span>
+    </div>
+  }
+
+  @if (note(); as message) {
+    <div class="banner note">{{ message }}</div>
+  }
+
+  <div class="columns">
+    <section class="stage">
+      @if (watch(); as current) {
+        @if (isClientDecoded()) {
+          <app-client-decoded-player
+            [socketPath]="current.transport.url"
+            (failed)="onPlayerFailed($event)"
+            (ended)="onEnded()" />
+        } @else {
+          <app-server-assisted-player
+            [whepUrl]="current.transport.url"
+            (failed)="onPlayerFailed($event)" />
+        }
+
+        <div class="facts">
+          <span class="fact">codec <b>{{ current.format.codec }}</b></span>
+          <span class="fact">size <b>{{ current.format.width }}×{{ current.format.height }}</b></span>
+          <span class="fact">fps <b>{{ current.format.frameRate }}</b></span>
+          <span class="fact">
+            kind <b>{{ current.format.live ? 'live' : 'file' }}</b>
+          </span>
+          <span class="fact" [class.good]="!converted()" [class.warn]="converted()">
+            server
+            <b>{{ converted() ? 'converting' : 'copying bytes — no codec work' }}</b>
+          </span>
+        </div>
+
+        @if (isClientDecoded()) {
+          <div class="facts">
+            <span class="fact">fps <b>{{ stats().fps }}</b></span>
+            <span class="fact">decode <b>{{ stats().decodeMs }} ms</b></span>
+            <span class="fact">queue <b>{{ stats().queueDepth }}</b></span>
+            <span class="fact">dropped <b>{{ stats().dropped }}</b></span>
+          </div>
+        }
+      } @else {
+        <div class="empty">
+          Paste an RTSP URL or a full path to a video file, then press Play.
+        </div>
+      }
+    </section>
+
+    <aside class="side">
+      <app-decode-mode-toggle
+        [selected]="mode()"
+        [availability]="watch()?.modeAvailability ?? []"
+        (modeChange)="onModeChange($event)" />
+
+      <app-capability-panel />
+    </aside>
+  </div>
+</main>

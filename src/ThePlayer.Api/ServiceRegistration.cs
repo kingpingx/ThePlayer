@@ -40,6 +40,10 @@ public static class ServiceRegistration
         services.AddSingleton<IMediaInspector, FFmpegMediaInspector>();
         services.AddSingleton<IMediaServer, MediaMtxPaths>();
 
+        // Stateless - it spawns a process per call and hands back ownership of it - so the
+        // lifetime here is about avoiding needless allocation, not about shared state.
+        services.AddSingleton<IFramePipeline, FFmpegStreamingPipeline>();
+
         // Concrete, not behind ports: pure in-process logic with nothing to substitute. The
         // coordinator is a singleton because it *is* the registry of what is currently live.
         services.AddSingleton<BroadcastPlanner>();

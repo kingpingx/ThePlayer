@@ -1,3 +1,4 @@
+using ThePlayer.Domain.Broadcasting;
 using ThePlayer.Domain.Hardware;
 using ThePlayer.Domain.Media;
 using ThePlayer.Domain.Monitoring;
@@ -85,6 +86,48 @@ public interface IMediaServerSupervisor
     /// endpoint has to be able to describe a broken server without breaking itself.
     /// </summary>
     MediaServerStatus Status { get; }
+}
+
+/// <summary>
+/// Produces a stream of whole compressed frames from an address, for the modes that deliver video
+/// over a socket rather than through the edge server.
+/// </summary>
+/// <remarks>
+/// A port because it spawns and owns a child FFmpeg process. Distinct from <see cref="IMediaServer"/>
+/// on purpose: that hands a stream to MediaMTX and steps out of the media path entirely, whereas
+/// this one keeps the bytes flowing through this process so they can be framed and fanned out.
+/// </remarks>
+public interface IFramePipeline
+{
+    /// <summary>
+    /// Starts the pipeline and waits until it has seen enough of the stream to describe it.
+    /// </summary>
+    /// <remarks>
+    /// It returns only once parameter sets have arrived, because the RFC 6381 codec string is
+    /// derived from them and a client cannot configure a decoder without it. Frames read while
+    /// waiting are buffered, not discarded.
+    /// </remarks>
+    /// <exception cref="MediaInspectionException">
+    /// The stream could not be started or could not be described. Always safe to show a user.
+    /// </exception>
+    Task<IFrameStream> StartAsync(
+        MediaAddress address,
+        BroadcastPlan plan,
+        VideoFormat format,
+        CancellationToken cancellationToken = default);
+}
+
+/// <summary>A running pipeline: how to configure a decoder for it, and its frames.</summary>
+public interface IFrameStream : IAsyncDisposable
+{
+    /// <summary>What a client needs to configure a decoder. Known before the first frame is served.</summary>
+    StreamInitialisation Initialisation { get; }
+
+    /// <summary>
+    /// Every frame, in order, starting with any buffered during <see cref="IFramePipeline.StartAsync"/>.
+    /// </summary>
+    /// <remarks>Enumerable once. The broadcaster is the only caller, and it fans out to viewers.</remarks>
+    IAsyncEnumerable<EncodedFrame> FramesAsync(CancellationToken cancellationToken = default);
 }
 
 /// <summary>

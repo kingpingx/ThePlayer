@@ -42,6 +42,33 @@ jobs:
       - name: Architecture tests
         run: dotnet test tests/ThePlayer.Architecture.Tests --no-build --configuration Release
 
+  # The Angular player. Separate from the .NET tiers because it shares none of their toolchain -
+  # a broken player should not read as a broken backend, and vice versa.
+  player:
+    name: Player
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: src/ThePlayer.Player
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: src/ThePlayer.Player/package-lock.json
+
+      - name: Install
+        run: npm ci
+
+      - name: Test
+        run: npm test -- --watch=false --browsers=ChromeHeadless
+
+      - name: Build
+        run: npm run build
+
   # Slow tier, and the one that earns its keep: running on both operating systems catches the path
   # separators, executable suffixes and hardware assumptions that otherwise surface at deployment.
   integration:

@@ -1,0 +1,63 @@
+name: Release
+
+# Releases are cut from tags, and their notes come straight out of CHANGELOG.md so there is one
+# place to write them and no chance of the two drifting apart.
+#
+# push        - tagging v* publishes that release automatically.
+# dispatch    - backfills every tag that has no release yet, which is how the tags that were
+#               pushed before this workflow existed get theirs.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+# The default token is read-only; creating a release needs write.
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Publish
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Tags, and the full history behind them - the notes for an old tag are read from the
+          # CHANGELOG at the default branch, so shallow cloning would hide most of it.
+          fetch-depth: 0
+
+      - name: Publish releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PUSHED_TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+        run: |
+          set -euo pipefail
+
+          if [ -n "$PUSHED_TAG" ]; then
+            tags="$PUSHED_TAG"
+            echo "Triggered by a tag push: $tags"
+          else
+            tags=$(git tag -l 'v*' | sort -V)
+            echo "Backfilling any tag without a release:"
+            echo "$tags" | sed 's/^/  /'
+          fi
+
+          for tag in $tags; do
+            if gh release view "$tag" >/dev/null 2>&1; then
+              echo "== $tag already has a release, leaving it alone"
+              continue
+            fi
+
+            version="${tag#v}"
+            notes=$(mktemp)
+            title=$(python3 .github/changelog-section.py "$version" "$notes")
+
+            if [ -z "$title" ]; then
+              echo "== $tag has no CHANGELOG section; skipping rather than publishing empty notes"
+              continue
+            fi
+
+            echo "== $tag -> $title"
+            gh release create "$tag" --title "$tag - $title" --notes-file "$notes" --verify-tag
+          done

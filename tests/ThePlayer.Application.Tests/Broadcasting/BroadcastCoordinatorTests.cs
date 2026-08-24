@@ -3,6 +3,7 @@ using Microsoft.Extensions.Options;
 using Microsoft.Extensions.Time.Testing;
 using NSubstitute;
 using ThePlayer.Application.Broadcasting;
+using ThePlayer.Application.Security;
 using ThePlayer.Domain.Broadcasting;
 using ThePlayer.Domain.Hardware;
 using ThePlayer.Domain.Media;
@@ -56,6 +57,13 @@ public class BroadcastCoordinatorTests
             _hardware,
             _framePipeline,
             new BroadcastPlanner(),
+
+            // Development defaults: the guard lets everything through, so these tests stay about
+            // reference counting rather than about policy. AddressGuardTests covers the policy.
+            new AddressGuard(
+                Substitute.For<IAddressResolver>(),
+                Options.Create(new AddressPolicyOptions()),
+                NullLogger<AddressGuard>.Instance),
             Options.Create(new BroadcastOptions { Linger = Linger }),
             _clock,
             NullLogger<BroadcastCoordinator>.Instance);

@@ -2,7 +2,9 @@ using ThePlayer.Application;
 using ThePlayer.Application.Broadcasting;
 using ThePlayer.Application.Monitoring;
 using ThePlayer.Infrastructure.FFmpeg;
+using ThePlayer.Application.Security;
 using ThePlayer.Infrastructure.MediaServer;
+using ThePlayer.Infrastructure.Networking;
 
 namespace ThePlayer.Api;
 
@@ -22,6 +24,7 @@ public static class ServiceRegistration
         services.AddOptionsWithValidation<FFmpegOptions>(configuration, FFmpegOptions.SectionName);
         services.AddOptionsWithValidation<MediaMtxOptions>(configuration, MediaMtxOptions.SectionName);
         services.AddOptionsWithValidation<BroadcastOptions>(configuration, BroadcastOptions.SectionName);
+        services.AddOptionsWithValidation<AddressPolicyOptions>(configuration, AddressPolicyOptions.SectionName);
 
         services.AddHttpClient();
 
@@ -46,6 +49,9 @@ public static class ServiceRegistration
 
         // Concrete, not behind ports: pure in-process logic with nothing to substitute. The
         // coordinator is a singleton because it *is* the registry of what is currently live.
+        services.AddSingleton<IAddressResolver, DnsAddressResolver>();
+        services.AddSingleton<AddressGuard>();
+
         services.AddSingleton<BroadcastPlanner>();
         services.AddSingleton<BroadcastCoordinator>();
         services.AddHostedService<BroadcastSweeper>();

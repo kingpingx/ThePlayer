@@ -131,6 +131,22 @@ public interface IFrameStream : IAsyncDisposable
 }
 
 /// <summary>
+/// Turns a host name into the addresses it points at.
+/// </summary>
+/// <remarks>
+/// A port because DNS is a network boundary, and because the address policy is far easier to test
+/// against a resolver that answers however the test needs than against whatever the machine running
+/// the suite happens to resolve.
+/// </remarks>
+public interface IAddressResolver
+{
+    /// <summary>Every address the host resolves to. Empty when it resolves to nothing.</summary>
+    Task<IReadOnlyList<System.Net.IPAddress>> ResolveAsync(
+        string host,
+        CancellationToken cancellationToken = default);
+}
+
+/// <summary>
 /// Raised when an address cannot be read: unreachable, wrong credentials, not a video file, or a
 /// format we cannot make sense of.
 /// </summary>

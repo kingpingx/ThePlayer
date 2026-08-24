@@ -95,9 +95,47 @@ asserts it appears in no captured log line, no API response, and no client-facin
 
 ---
 
+## Where the server will connect
+
+A server that dials whatever address it is handed is a request-forgery surface: anyone who can
+reach the API can make it open a connection to an arbitrary host and read the outcome back out of
+the error message. On a laptop that is the entire point — you want it to reach the camera on your
+desk. On a host anyone can find, it is a way to map the network the server sits inside.
+
+`AddressGuard` decides, before anything connects, whether this deployment will touch an address at
+all. It runs ahead of inspection, so a refused address never reaches ffprobe and nothing about the
+target leaks back — not even how long it took to fail.
+
+```jsonc
+"AddressPolicy": {
+  "AllowPrivateNetworks": false,        // refuse RFC 1918, loopback, link-local, CGNAT, multicast
+  "AllowedFileRoots": [ "/app/samples" ] // and refuse file paths outside these
+}
+```
+
+Both default to permissive, because the development default has to be "the camera on your desk
+works". `appsettings.Production.json` turns them on.
+
+Three details worth knowing:
+
+- **A literal address is checked without a lookup**, so a hostile literal never reaches the
+  resolver either.
+- **Every answer must pass.** A name resolving to one public address and one private one is
+  refused — that combination is the shape an attacker would choose, not an accident.
+- **A failed lookup is a refusal, not a pass.** Failing open would make the control a formality:
+  break DNS, reach anything.
+
+The refusal names neither the resolved address nor the credentials. Saying *"that maps to
+10.1.2.3"* would answer the exact question the probe was asking.
+
+`169.254.169.254` is in the blocked set for a specific reason: it is the cloud metadata endpoint,
+and on most hosts it hands out credentials to anyone who asks.
+
+---
+
 ## Residual risks
 
-Two things are **not** solved. They are listed here rather than papered over.
+Three things are **not** solved. They are listed here rather than papered over.
 
 ### Process arguments are visible
 
@@ -108,15 +146,23 @@ pass RTSP credentials out of band.
 *Mitigation:* run the server as a dedicated user. On a shared machine, assume anyone with an
 account can read the camera password.
 
-### The server connects wherever it is told
+### A name can change its answer between the check and the connection
 
-Addresses come from the UI, so anyone who can reach the API can make the server open a connection
-to an arbitrary host — a server-side request forgery surface. On a LAN tool this is acceptable;
-across a network boundary it is not.
+`AddressGuard` resolves a host name, and then FFmpeg resolves it again. A name that answers with a
+public address for the first lookup and a private one for the second slips through the gap — DNS
+rebinding, and it defeats address filtering by design rather than by accident.
 
-*Mitigation:* the API-key auth added in Phase 6. This is why that phase matters more than it
-otherwise would. If the server is ever exposed beyond a trusted network, address allow-listing
-should be added on top.
+*Mitigation:* none built. Closing it means pinning the address the guard approved and handing
+FFmpeg that instead of the name, which changes what is passed to every pipeline. Worth doing before
+this is exposed to an untrusted audience rather than a demo one.
+
+### There is still no authentication
+
+Address filtering bounds *where* the server will connect. It does nothing about *who* may ask. Any
+visitor can start a broadcast, and from Phase 4 read the host's CPU and GPU load.
+
+*Mitigation:* the API key in Phase 6. Filtering makes a public demo defensible; it does not make
+the instance private.
 
 ---
 

@@ -1,0 +1,88 @@
+# Fly.io deployment.
+#
+# Fly rather than a plain HTTP host because WebRTC media is UDP, and most platform-as-a-service
+# hosts route only one HTTP port. Without UDP ingress the WebRTC handshake succeeds and then no
+# video ever arrives - `ServerAssisted` would look available and quietly fail, which is worse than
+# not offering it.
+#
+#   fly launch --no-deploy --copy-config     # once, to create the app
+#   fly ips allocate-v4                      # WebRTC needs a dedicated IPv4
+#   fly deploy
+#
+# After the first deploy, set the ICE host to the address a browser can reach, or the WebRTC modes
+# will not play:
+#
+#   fly secrets set MediaMtx__WebRtcAdditionalHosts__0=$(fly ips list --json | jq -r '.[0].Address')
+#
+# The double underscore is how .NET configuration reads nested keys out of the environment, and the
+# trailing index is how it reads an array element.
+
+app = "theplayer"
+primary_region = "lhr"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  ASPNETCORE_ENVIRONMENT = "Production"
+
+  # MediaMTX binds these inside the machine. The UDP one has to match the service below.
+  MediaMtx__WebRtcLocalUdpAddress = ":8189"
+
+# ---------------------------------------------------------------------------------------------
+# HTTP: the API, the frame socket, and the player.
+# ---------------------------------------------------------------------------------------------
+[http_service]
+  internal_port = 8080
+  force_https = true
+
+  # Not auto-stopped. A machine that suspends mid-stream drops every viewer, and a cold start is
+  # tens of seconds - long enough that a demo looks broken rather than asleep.
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [http_service.concurrency]
+    type = "connections"
+
+    # A frame socket is a long-lived connection, not a request. Counting them is the only way the
+    # limits mean anything here.
+    hard_limit = 50
+    soft_limit = 40
+
+# ---------------------------------------------------------------------------------------------
+# WebRTC media. This is the part a single-HTTP-port host cannot do.
+# ---------------------------------------------------------------------------------------------
+[[services]]
+  protocol = "udp"
+  internal_port = 8189
+
+  [[services.ports]]
+    port = 8189
+
+# ---------------------------------------------------------------------------------------------
+# WebRTC signalling. MediaMTX serves WHEP on 8889, and the browser posts its SDP offer straight
+# there rather than through the API.
+# ---------------------------------------------------------------------------------------------
+[[services]]
+  protocol = "tcp"
+  internal_port = 8889
+
+  [[services.ports]]
+    port = 8889
+    handlers = ["tls", "http"]
+
+[[vm]]
+  # FFmpeg copying bytes is cheap; converting is not. Phase 3 brings conversion, and this will need
+  # revisiting then - there is no GPU here, so it would be libx264 on these cores.
+  size = "shared-cpu-2x"
+  memory = "1gb"
+
+[checks]
+  [checks.health]
+    type = "http"
+    port = 8080
+    path = "/api/health"
+    interval = "30s"
+    timeout = "5s"
+    grace_period = "30s"

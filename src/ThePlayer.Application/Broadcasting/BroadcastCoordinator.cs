@@ -1,6 +1,7 @@
 using System.Threading.Channels;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using ThePlayer.Application.Security;
 using ThePlayer.Domain.Broadcasting;
 using ThePlayer.Domain.Media;
 using ThePlayer.Domain.Playback;
@@ -85,6 +86,7 @@ public sealed class BroadcastCoordinator(
     IHardwareInspector hardwareInspector,
     IFramePipeline framePipeline,
     BroadcastPlanner planner,
+    AddressGuard addressGuard,
     IOptions<BroadcastOptions> options,
     TimeProvider clock,
     ILogger<BroadcastCoordinator> logger)
@@ -114,6 +116,10 @@ public sealed class BroadcastCoordinator(
         ClientDecodeSupport clientSupport,
         CancellationToken cancellationToken = default)
     {
+        // Before anything connects. A refused address never reaches ffprobe, so nothing about the
+        // target - not even how long it took to fail - leaks back to whoever asked.
+        await addressGuard.EnsureAllowedAsync(address, cancellationToken);
+
         // Inspection talks to the camera and can take seconds, so it happens before the lock is
         // taken. Holding the lock across it would serialise every viewer in the system behind one
         // slow device.

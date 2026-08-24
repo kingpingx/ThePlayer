@@ -240,6 +240,7 @@ bar would work in one mode and not the others), audio, recording, and WebTranspo
 
 - [ROADMAP.md](docs/ROADMAP.md) — the plan for phases 2–6, in build-ready detail
 - [EXECUTION.md](docs/EXECUTION.md) — how it runs: architecture, flow, and what every file is for
+- [DEPLOYMENT.md](docs/DEPLOYMENT.md) — Docker and Fly.io, and why the host has to carry UDP
 - [ARCHITECTURE.md](docs/ARCHITECTURE.md) — layering, conventions, and why the model is as small as it is
 - [PROTOCOL.md](docs/PROTOCOL.md) — the wire contract, frozen so the backend can be replaced
 - [SECURITY.md](docs/SECURITY.md) — credential handling and the risks that remain

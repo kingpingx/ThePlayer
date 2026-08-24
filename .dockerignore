@@ -1,0 +1,21 @@
+# Build context hygiene. node_modules alone is hundreds of megabytes and is rebuilt inside the
+# image from the lockfile anyway, so shipping it would slow every build down for no benefit.
+**/node_modules/
+**/bin/
+**/obj/
+**/dist/
+**/.angular/
+
+.git/
+.github/
+.vs/
+.vscode/
+.idea/
+
+# Not needed to build or run the image.
+tests/
+docs/
+sample/
+tools/bin/
+*.md
+*.sln

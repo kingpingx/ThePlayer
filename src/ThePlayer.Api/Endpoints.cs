@@ -1,5 +1,6 @@
 using ThePlayer.Application;
 using ThePlayer.Application.Broadcasting;
+using ThePlayer.Application.Security;
 using ThePlayer.Application.Monitoring;
 using ThePlayer.Domain.Broadcasting;
 using ThePlayer.Domain.Media;
@@ -34,6 +35,7 @@ public static class Endpoints
             .WithName("StartWatching")
             .Produces<WatchResponse>()
             .ProducesProblem(StatusCodes.Status400BadRequest)
+            .ProducesProblem(StatusCodes.Status403Forbidden)
             .ProducesProblem(StatusCodes.Status501NotImplemented)
             .ProducesProblem(StatusCodes.Status502BadGateway);
 
@@ -101,6 +103,12 @@ public static class Endpoints
                 cancellationToken);
 
             return Results.Ok(ToResponse(ticket));
+        }
+        catch (AddressNotAllowedException ex)
+        {
+            // 403 rather than 400: the request is well formed and understood, this deployment just
+            // will not connect to that address.
+            return Problem(StatusCodes.Status403Forbidden, "Address not allowed", ex.Message);
         }
         catch (MediaInspectionException ex)
         {

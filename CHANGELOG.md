@@ -7,6 +7,32 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## Unreleased
+
+Deployment, pulled forward from Phase 6 so that Phase 2 can be shown to someone who is not sitting
+at your keyboard. Authentication is still Phase 6 and is still missing.
+
+### Added
+
+- **`AddressGuard`** - decides whether this deployment will connect to an address at all, before
+  anything tries to. A server that dials whatever it is handed can be used to map the network it
+  sits inside; `AddressPolicy` refuses private, loopback, link-local, CGNAT and multicast ranges,
+  and file paths outside a configured root. Off by default, on in Production.
+- **`Dockerfile`** and **`fly.toml`** - one container carrying the API, the Angular player, FFmpeg
+  and MediaMTX, with two sample clips generated at build time so there is something to play.
+- **[DEPLOYMENT.md](docs/DEPLOYMENT.md)** - and the constraint that decides the host: WebRTC media
+  is UDP, and most platform-as-a-service hosts route one HTTP port and no UDP, so `ServerAssisted`
+  cannot work on them.
+- **Release workflow** - tagging `v*` publishes a GitHub release with notes taken from this file,
+  so a phase is described once.
+
+### Changed
+
+- `MediaAddress` exposes `Host`, so policy can be decided without pulling the URL apart again next
+  to the credentials.
+- A refused address is `403`, not `400`: the request is well formed, this deployment just will not
+  connect to it.
+
 ## [0.3.0] — Phase 2: Client-side decoding
 
 The server stops touching the video. FFmpeg copies bytes, the browser decodes them with its own GPU

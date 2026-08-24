@@ -42,13 +42,15 @@ public sealed class MediaAddress : IEquatable<MediaAddress>
         string raw,
         string display,
         string? userName,
-        string[] secrets)
+        string[] secrets,
+        string? host = null)
     {
         Kind = kind;
         _raw = raw;
         Display = display;
         UserName = userName;
         _secrets = secrets;
+        Host = host;
     }
 
     public MediaAddressKind Kind { get; }
@@ -61,6 +63,17 @@ public sealed class MediaAddress : IEquatable<MediaAddress>
 
     /// <summary>The username, if the address carried one. Usernames are not secret; passwords are.</summary>
     public string? UserName { get; }
+
+    /// <summary>
+    /// The host an RTSP address points at, or <c>null</c> for a file.
+    /// </summary>
+    /// <remarks>
+    /// Exposed so a deployment can refuse to connect to addresses it should not reach - a public
+    /// server that will dial any address given to it is a request-forgery surface. Deciding that is
+    /// policy and lives in Application; all Domain owes it is the host, cleanly separated from the
+    /// credentials sitting next to it in the URL.
+    /// </remarks>
+    public string? Host { get; }
 
     public bool HasCredentials => _secrets.Length > 0;
 
@@ -251,7 +264,7 @@ public sealed class MediaAddress : IEquatable<MediaAddress>
         var port = uri.IsDefaultPort ? string.Empty : $":{uri.Port}";
         var display = $"{uri.Scheme}://{credentialsForDisplay}{uri.Host}{port}{uri.PathAndQuery}";
 
-        address = new MediaAddress(MediaAddressKind.Rtsp, input, display, userName, secrets);
+        address = new MediaAddress(MediaAddressKind.Rtsp, input, display, userName, secrets, uri.Host);
         error = null;
         return true;
     }

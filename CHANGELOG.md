@@ -9,6 +9,43 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## Unreleased
 
+### Phase 6: Deployment and hardening
+
+The last phase. What was left was not features but the two things that decide whether this can run
+anywhere other than the machine that built it: nothing may outlive the server, and not everyone may
+use it.
+
+#### Added
+
+- **API key authentication.** Off by default, required in Production, and the host **refuses to
+  start** if it is required with no keys configured — that is one missing environment variable away
+  at any time, and every other symptom of it looks like a client problem. Several keys are accepted
+  so one can be rotated without a window where neither works, and the comparison is fixed-time over
+  SHA-256 digests so neither the key nor its length leaks through timing.
+- **Child processes now die with the server.** A Job Object with `KILL_ON_JOB_CLOSE` on Windows,
+  `setpriv --pdeathsig` on Linux. This was a known gap since Phase 0: a `taskkill /F` left MediaMTX
+  holding ports 8554, 8889 and 9997, and the supervisor's adoption of a survivor was a recovery
+  rather than a fix. Verified by killing a running server with two FFmpeg processes and MediaMTX
+  alive, and finding none of them afterwards.
+- **`docker-compose.yml`** — Linux, host networking, and the NVIDIA device reservation. Host
+  networking because WebRTC needs to advertise an address a browser can reach, and behind a bridge
+  the container's own view of itself is not one.
+- **[HARDWARE.md](docs/HARDWARE.md)** — what the machine needs, what it does without, and the one
+  container-toolkit step that GPU encoding and GPU metrics share. They succeed or fail together, so
+  documenting them apart would have been two chances to do half of it.
+- **An API key panel in the player**, which appears only after the server has actually answered
+  `401`. A local deployment demands nothing, so asking everyone for a credential that mostly does
+  not exist would be the wrong default.
+
+#### Changed
+
+- **`GET /api/health` answers everyone, but says less to an anonymous caller** — `{healthy,
+  environment}` rather than the FFmpeg build, every acceleration profile on the machine and its
+  recent failures. Probes keep working; the hardware inventory stops being public.
+- The frame socket is authorised by the viewer id in its path rather than by the key. A browser
+  cannot set a header on a `WebSocket`, and the id is already a capability only an authorised watch
+  call can mint — a better fit than putting the long-lived secret in a second URL.
+
 ### Phase 5: Full server decoding and the three-way comparison
 
 The third mode, and the only one where the browser decodes no video at all. The server decodes every

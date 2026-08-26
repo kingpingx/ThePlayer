@@ -123,7 +123,8 @@ Honest gaps, all of them Phase 6:
 - **Authentication.** As above.
 - **Killing children with the parent.** A hard kill of the API leaves MediaMTX holding its ports. In
   a container the whole thing goes down together, so this bites far less here than it does natively —
-  but a Windows Job Object and `PR_SET_PDEATHSIG` are still the real fix.
+  and since Phase 6 a Job Object (Windows) and `setpriv --pdeathsig` (Linux) make the kernel
+  enforce it, so a hard kill leaves nothing behind.
 - **DNS rebinding.** Address filtering resolves a name, and FFmpeg resolves it again. See
   [SECURITY.md](SECURITY.md).
 - **No GPU.** Fine for a browser that can decode the source, which still costs the server nothing.

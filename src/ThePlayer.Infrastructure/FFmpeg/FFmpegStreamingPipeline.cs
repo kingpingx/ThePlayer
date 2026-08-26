@@ -8,6 +8,7 @@ using ThePlayer.Application.Monitoring;
 using ThePlayer.Domain.Broadcasting;
 using ThePlayer.Domain.Hardware;
 using ThePlayer.Domain.Media;
+using ThePlayer.Infrastructure.Processes;
 
 namespace ThePlayer.Infrastructure.FFmpeg;
 
@@ -35,6 +36,7 @@ public sealed class FFmpegStreamingPipeline(
     IOptions<PictureOptions> pictureOptions,
     IHardwareInspector hardwareInspector,
     EncoderFallbackLog fallbackLog,
+    IChildProcessGuard guard,
     ILogger<FFmpegStreamingPipeline> logger) : IFramePipeline
 {
     private readonly FFmpegOptions _options = options.Value;
@@ -125,6 +127,8 @@ public sealed class FFmpegStreamingPipeline(
             },
         };
 
+        guard.Prepare(process.StartInfo);
+
         try
         {
             process.Start();
@@ -136,6 +140,10 @@ public sealed class FFmpegStreamingPipeline(
                 $"Could not start '{_options.FFmpegPath}'. Check that it is installed and on PATH.",
                 ex);
         }
+
+        // Bound to this server's lifetime before anything else happens to it, so a hard kill in
+        // the next moment does not leave it holding a camera connection.
+        guard.Adopt(process);
 
         // Both asked of the same pair of functions rather than worked out again here, so the
         // reader at this end of the pipe cannot disagree with the muxer at the other.

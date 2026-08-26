@@ -1,5 +1,6 @@
 import { Injectable, inject } from '@angular/core';
 import { environment } from '../../environments/environment';
+import { ApiKeyService } from './api-key.service';
 import { ClientCapabilitiesService } from './client-capabilities.service';
 import { PlaybackMode, ProblemDetails, WatchResponse } from './models';
 
@@ -24,6 +25,7 @@ export class WatchError extends Error {
 @Injectable({ providedIn: 'root' })
 export class WatchService {
   private readonly capabilities = inject(ClientCapabilitiesService);
+  private readonly apiKey = inject(ApiKeyService);
   private viewerId: string | null = null;
 
   async start(address: string, mode: PlaybackMode): Promise<WatchResponse> {
@@ -33,11 +35,17 @@ export class WatchService {
 
     const response = await fetch(`${environment.apiBase}/api/watch`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...this.apiKey.headers() },
       body: JSON.stringify({ address, mode, clientDecodeSupport }),
     });
 
     const body = await response.json();
+
+    if (response.status === 401) {
+      // The server has now said so itself, which is the only reliable way to know: a deployment
+      // that wants no key never mentions one.
+      this.apiKey.required.set(true);
+    }
 
     if (!response.ok) {
       const problem = body as ProblemDetails;
@@ -65,6 +73,7 @@ export class WatchService {
     try {
       await fetch(`${environment.apiBase}/api/watch/${viewerId}`, {
         method: 'DELETE',
+        headers: this.apiKey.headers(),
 
         // keepalive so the request still lands when the tab is closing, which is the case that
         // matters most - it is what stops a refresh leaving a pipeline running.

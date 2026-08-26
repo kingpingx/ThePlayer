@@ -17,6 +17,16 @@ public sealed record HealthResponse(
     HardwareHealth Hardware,
     IReadOnlyList<EncoderFallbackInfo> EncoderFallbacks);
 
+/// <summary>
+/// What <c>GET /api/health</c> tells a caller that has not presented a key.
+/// </summary>
+/// <remarks>
+/// Enough for a probe - is this instance serving, and which configuration is it running - and
+/// nothing an anonymous caller could use to plan. The full body names the FFmpeg build, the GPU,
+/// every acceleration profile on the machine and what has recently failed on it.
+/// </remarks>
+public sealed record BriefHealthResponse(bool Healthy, string Environment);
+
 /// <summary>State of the MediaMTX child process.</summary>
 public sealed record MediaServerHealth(
     string State,

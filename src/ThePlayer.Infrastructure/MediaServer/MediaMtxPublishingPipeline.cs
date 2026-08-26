@@ -8,6 +8,7 @@ using ThePlayer.Domain.Broadcasting;
 using ThePlayer.Domain.Hardware;
 using ThePlayer.Domain.Media;
 using ThePlayer.Infrastructure.FFmpeg;
+using ThePlayer.Infrastructure.Processes;
 
 namespace ThePlayer.Infrastructure.MediaServer;
 
@@ -34,6 +35,7 @@ public sealed class MediaMtxPublishingPipeline(
     IOptions<FFmpegOptions> options,
     IHardwareInspector hardwareInspector,
     EncoderFallbackLog fallbackLog,
+    IChildProcessGuard guard,
     ILogger<MediaMtxPublishingPipeline> logger) : IPublishingPipeline
 {
     private readonly FFmpegOptions _options = options.Value;
@@ -150,6 +152,8 @@ public sealed class MediaMtxPublishingPipeline(
             },
         };
 
+        guard.Prepare(process.StartInfo);
+
         try
         {
             process.Start();
@@ -161,6 +165,10 @@ public sealed class MediaMtxPublishingPipeline(
                 $"Could not start '{_options.FFmpegPath}'. Check that it is installed and on PATH.",
                 ex);
         }
+
+        // Bound to this server's lifetime before anything else happens to it, so a hard kill in
+        // the next moment does not leave it holding a camera connection.
+        guard.Adopt(process);
 
         var stream = new PublishedStream(process, profile, address, logger);
 

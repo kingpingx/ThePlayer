@@ -1,5 +1,6 @@
 import { Component, computed, inject, signal } from '@angular/core';
 import { AddressBarComponent } from './features/address-bar/address-bar.component';
+import { ApiKeyPanelComponent } from './features/api-key/api-key-panel.component';
 import { CapabilityPanelComponent } from './features/capability-panel/capability-panel.component';
 import { ClientDecodedPlayerComponent } from './features/video-player/client-decoded-player.component';
 import { DecodeModeToggleComponent } from './features/video-player/decode-mode-toggle.component';
@@ -19,6 +20,7 @@ import { WatchError, WatchService } from './core/watch.service';
   standalone: true,
   imports: [
     AddressBarComponent,
+    ApiKeyPanelComponent,
     CapabilityPanelComponent,
     ClientDecodedPlayerComponent,
     DecodeModeToggleComponent,

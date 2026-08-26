@@ -15,9 +15,31 @@ Everything is JSON, camel-cased, over HTTP. Three transports:
 
 ---
 
-## Status: Phase 5
+## Status: Phase 6 — `v1.0.0`
 
-Every endpoint below is built, and all three playback modes are served. `GET /api/health`, `POST /api/watch`,
+Every endpoint below is built, all three playback modes are served, and a deployment can require a
+key for them.
+
+### Authentication
+
+Off by default, required in Production. Where it is on, every endpoint below wants the key except
+the two noted:
+
+```
+X-Api-Key: <key>
+```
+
+`EventSource` and `WebSocket` cannot set headers, so `GET /api/metrics/stream` also accepts
+`?key=<key>`. It is the weaker form — query strings reach proxy logs — and is used only where there
+is no header to use instead.
+
+| Endpoint | Without a key |
+|---|---|
+| `GET /api/health` | Answers, with `{healthy, environment}` and nothing else |
+| `WS /ws/frames/{viewerId}` | Answers — the viewer id is itself the capability, and only an authorised watch call mints one |
+| Everything else | `401`, with a `WWW-Authenticate` header naming the scheme |
+
+A refusal never says which part of the key was wrong, or whether one was recognised. `GET /api/health`, `POST /api/watch`,
 `DELETE /api/watch/{viewerId}`, `GET /api/broadcasts`, `WS /ws/frames/{viewerId}` and
 `GET /api/metrics/stream` all exist and are exercised by the player.
 

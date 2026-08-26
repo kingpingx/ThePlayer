@@ -80,6 +80,8 @@
     </section>
 
     <aside class="side">
+      <app-api-key-panel />
+
       <app-decode-mode-toggle
         [selected]="mode()"
         [availability]="watch()?.modeAvailability ?? []"

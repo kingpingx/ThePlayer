@@ -1,0 +1,70 @@
+# ThePlayer on a Linux host, on your own network.
+#
+#   docker compose up --build
+#
+# Different from the Fly deployment in one way that decides everything else: this uses **host
+# networking**. WebRTC needs the server to advertise ICE candidates a browser can actually reach,
+# and behind Docker's bridge the container's view of its own address is not one of them. On the host
+# network there is no translation to undo, and `webrtcAdditionalHosts` needs nothing set.
+#
+# The price is that the container is not isolated from the host's network, which on a machine you
+# own and a network you trust is the trade this is for. Read docs/SECURITY.md before putting it
+# anywhere else.
+#
+# Windows is deliberately not a target here. Docker Desktop NATs container traffic even in host
+# mode, which breaks ICE by design - the documented Windows path stays native. See docs/HARDWARE.md.
+
+services:
+  theplayer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    # Every port the system uses, without mapping any of them: 8080 for the API and the player,
+    # 8554 RTSP, 8889 WebRTC signalling, 8189/udp WebRTC media, 9997 the MediaMTX control API.
+    network_mode: host
+
+    environment:
+      ASPNETCORE_ENVIRONMENT: Production
+      PORT: 8080
+
+      # Required in Production, and the host refuses to start without it rather than serving a wall
+      # of 401s. Put the real value in a .env file beside this one - never in here, which is
+      # committed.
+      ApiKey__Required: "true"
+      ApiKey__Keys__0: ${THEPLAYER_API_KEY:?set THEPLAYER_API_KEY, in a .env file or the environment}
+
+      # On your own network the cameras are the point, so the address policy that a public host
+      # needs would refuse exactly what you are trying to watch. This is the one setting to think
+      # about again if this container ever becomes reachable from outside.
+      AddressPolicy__AllowPrivateNetworks: "true"
+
+    # GPU access. Comment this block out on a machine without an NVIDIA card and everything still
+    # works - hardware detection finds nothing, encoding falls back to libx264, and the resource
+    # monitor reports GPU metrics as unavailable with the reason attached.
+    #
+    # It needs the NVIDIA Container Toolkit on the host. That is the same prerequisite NVENC has, so
+    # GPU encoding and GPU metrics succeed or fail together - see docs/HARDWARE.md.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu, video, utility]
+
+    # Video files to play, if you have any. The address policy in Production refuses paths outside
+    # its allowed roots, and /app/samples is the one the image already sets.
+    volumes:
+      - ./sample:/app/samples:ro
+
+    restart: unless-stopped
+
+    # The reduced health body, which is what an anonymous probe gets. Enough to know the instance is
+    # serving; nothing about the machine it is serving from.
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:8080/api/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3

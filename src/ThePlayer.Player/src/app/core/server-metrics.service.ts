@@ -1,5 +1,6 @@
-import { Injectable, signal } from '@angular/core';
+import { Injectable, inject, signal } from '@angular/core';
 import { environment } from '../../environments/environment';
+import { ApiKeyService } from './api-key.service';
 import { ServerMetrics } from './models';
 
 /** Whether the feed is delivering, and if not, what it is doing about it. */
@@ -21,6 +22,7 @@ export class ServerMetricsService {
   readonly metrics = signal<ServerMetrics | null>(null);
   readonly state = signal<FeedState>('idle');
 
+  private readonly apiKey = inject(ApiKeyService);
   private source: EventSource | null = null;
 
   start(): void {
@@ -29,7 +31,11 @@ export class ServerMetricsService {
     }
 
     this.state.set('connecting');
-    const source = new EventSource(`${environment.apiBase}/api/metrics/stream`);
+    // EventSource cannot set a header, so the key rides in the query string here - the weaker
+    // of the two forms the server accepts, used only where there is no alternative.
+    const source = new EventSource(
+      this.apiKey.withKey(`${environment.apiBase}/api/metrics/stream`),
+    );
     this.source = source;
 
     source.onmessage = (event) => {

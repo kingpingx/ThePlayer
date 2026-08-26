@@ -5,6 +5,7 @@ using ThePlayer.Infrastructure.FFmpeg;
 using ThePlayer.Application.Security;
 using ThePlayer.Infrastructure.MediaServer;
 using ThePlayer.Infrastructure.Monitoring;
+using ThePlayer.Infrastructure.Processes;
 using ThePlayer.Infrastructure.Networking;
 
 namespace ThePlayer.Api;
@@ -29,6 +30,7 @@ public static class ServiceRegistration
         services.AddOptionsWithValidation<MetricsOptions>(configuration, MetricsOptions.SectionName);
         services.AddOptionsWithValidation<GpuMetricsOptions>(configuration, GpuMetricsOptions.SectionName);
         services.AddOptionsWithValidation<PictureOptions>(configuration, PictureOptions.SectionName);
+        services.AddOptionsWithValidation<ApiKeyOptions>(configuration, ApiKeyOptions.SectionName);
 
         services.AddHttpClient();
 
@@ -39,6 +41,14 @@ public static class ServiceRegistration
         // Injected rather than calling DateTimeOffset.UtcNow directly, so linger and cache
         // expiry can be tested by advancing a fake clock instead of sleeping.
         services.AddSingleton(TimeProvider.System);
+
+        // One guard for the whole process, because on Windows it owns a single job object whose
+        // lifetime is the guarantee. A second one would be a second job, and a child in the wrong
+        // job outlives the kill it was supposed to die with.
+        services.AddSingleton(provider =>
+            ChildProcessGuards.For(provider.GetRequiredService<ILoggerFactory>()));
+
+        services.AddSingleton<ApiKeyGuard>();
 
         // Singletons because both cache: the inspector memoises its FFmpeg probe, and the
         // supervisor owns a child process for the lifetime of the app.

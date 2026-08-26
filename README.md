@@ -8,11 +8,11 @@ Chrome, whatever codec it happens to be in. An H.265 feed plays in a browser tha
 H.265. A browser that *can* decode H.265 gets the original bytes untouched, and the server's
 conversion cost drops to zero.
 
-> **Status:** Phase 5 (`v0.6.0`) — all three modes, and the comparison between them. **The browser
-> can decode everything, something, or nothing at all**, and the page shows what each choice costs
-> at both ends as it happens. Pass an H.265 feed through untouched and the server's encoder sits at
-> zero; ask it to decode every frame instead and the cost moves across, along with five times the
-> bandwidth. What is left is authentication (Phase 6). See [Roadmap](#roadmap).
+> **Status:** Phase 6 (`v1.0.0`) — feature complete. **The browser can decode everything,
+> something, or nothing at all**, and the page shows what each choice costs at both ends as it
+> happens. Pass an H.265 feed through untouched and the server's encoder sits at zero; ask it to
+> decode every frame instead and the cost moves across, along with five times the bandwidth. A
+> deployment can now require a key, and nothing it starts outlives it. See [Roadmap](#roadmap).
 
 ---
 
@@ -227,7 +227,7 @@ other processes of the same user, and the server will connect to whatever addres
 | ✅ 3 | H.265 conversion — **it plays everywhere**, converted only for clients that need it | `v0.4.0` |
 | ✅ 4 | Server CPU and GPU live in the browser — **the cost of the choice, on screen** | `v0.5.0` |
 | ✅ 5 | Full server decoding — **the client decodes nothing**, and all three costs are on screen | `v0.6.0` |
-| 6 | Docker, auth, docs | `v1.0.0` |
+| ✅ 6 | Deployment and hardening — **auth, and children that die with the server** | `v1.0.0` |
 
 [docs/ROADMAP.md](docs/ROADMAP.md) has the full plan for phases 2–6 — components, FFmpeg arguments,
 risks and verification steps for each.

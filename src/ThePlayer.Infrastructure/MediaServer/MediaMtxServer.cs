@@ -6,6 +6,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using ThePlayer.Application;
 using ThePlayer.Domain.Monitoring;
+using ThePlayer.Infrastructure.Processes;
 
 namespace ThePlayer.Infrastructure.MediaServer;
 
@@ -83,6 +84,7 @@ public sealed class MediaMtxOptions
 public sealed class MediaMtxSupervisor(
     IOptions<MediaMtxOptions> options,
     IHttpClientFactory httpClientFactory,
+    IChildProcessGuard guard,
     ILogger<MediaMtxSupervisor> logger) : BackgroundService, IMediaServerSupervisor
 {
     /// <summary>
@@ -204,7 +206,13 @@ public sealed class MediaMtxSupervisor(
             },
         };
 
+        guard.Prepare(process.StartInfo);
         process.Start();
+
+        // The reason this exists. A hard kill of this server used to leave MediaMTX holding ports
+        // 8554, 8889 and 9997, so the next start found them taken.
+        guard.Adopt(process);
+
         logger.LogInformation("Started MediaMTX (pid {Pid}) from {Binary}.", process.Id, binary);
 
         // MediaMTX is chatty, and an undrained pipe eventually blocks it. Forwarding its output

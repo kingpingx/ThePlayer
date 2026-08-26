@@ -3,6 +3,7 @@ using System.Text;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using ThePlayer.Domain.Media;
+using ThePlayer.Infrastructure.Processes;
 
 namespace ThePlayer.Infrastructure.FFmpeg;
 
@@ -88,6 +89,7 @@ public sealed record ProcessResult(int ExitCode, string StandardOutput, string S
 /// </remarks>
 public sealed class FFmpegCommandRunner(
     IOptions<FFmpegOptions> options,
+    IChildProcessGuard guard,
     ILogger<FFmpegCommandRunner> logger)
 {
     private readonly FFmpegOptions _options = options.Value;
@@ -140,6 +142,8 @@ public sealed class FFmpegCommandRunner(
             },
         };
 
+        guard.Prepare(process.StartInfo);
+
         try
         {
             process.Start();
@@ -150,6 +154,10 @@ public sealed class FFmpegCommandRunner(
             // than letting a Win32Exception surface from somewhere deep in a pipeline.
             throw new ExternalToolNotFoundException(executable, ex);
         }
+
+        // Short-lived, but nvidia-smi runs once a second while anyone is watching the metrics feed,
+        // so there is always one of these in flight to be orphaned.
+        guard.Adopt(process);
 
         // Start both reads before awaiting either. See the remarks above - doing this in sequence
         // deadlocks on any command that fills the stderr buffer.

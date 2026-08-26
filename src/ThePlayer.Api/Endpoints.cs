@@ -17,15 +17,26 @@ public static class Endpoints
 {
     public static void MapThePlayerEndpoints(this WebApplication app)
     {
-        app.MapGet("/api/health", async (HealthReporter reporter, CancellationToken cancellationToken) =>
+        app.MapGet("/api/health", async (
+                HttpContext context,
+                HealthReporter reporter,
+                ApiKeyGuard guard,
+                CancellationToken cancellationToken) =>
             {
                 var health = await reporter.GetAsync(cancellationToken);
 
-                // 200 when usable, 503 when not, so container and uptime probes work without
-                // parsing the body. The body explains *why* either way.
+                // Reachable without a key, because a liveness probe that needs a secret is a
+                // liveness probe that ends up switched off. What it *says* still depends on one:
+                // the full body inventories the machine's hardware and its recent failures, and
+                // that is not something to hand an anonymous caller on a public host.
+                object body = Authorised(context, guard)
+                    ? ToResponse(health)
+                    : new BriefHealthResponse(health.IsHealthy, health.Environment);
+
+                // 200 when usable, 503 when not, so probes work without parsing the body at all.
                 return health.IsHealthy
-                    ? Results.Ok(ToResponse(health))
-                    : Results.Json(ToResponse(health), statusCode: StatusCodes.Status503ServiceUnavailable);
+                    ? Results.Ok(body)
+                    : Results.Json(body, statusCode: StatusCodes.Status503ServiceUnavailable);
             })
             .WithName("GetHealth")
             .Produces<HealthResponse>()
@@ -136,6 +147,28 @@ public static class Endpoints
 
     private static IResult Problem(int statusCode, string title, string? detail) =>
         Results.Problem(detail: detail, title: title, statusCode: statusCode);
+
+    /// <summary>
+    /// Whether this caller has earned the detailed health body.
+    /// </summary>
+    /// <remarks>
+    /// Asked here rather than in the middleware because health is the one endpoint that answers
+    /// either way. A deployment demanding no key at all authorises everyone, which is the same
+    /// answer it gives everywhere else.
+    /// </remarks>
+    private static bool Authorised(HttpContext context, ApiKeyGuard guard)
+    {
+        if (!guard.Required)
+        {
+            return true;
+        }
+
+        var presented = context.Request.Headers.TryGetValue(ApiKeyGuard.HeaderName, out var header) && header.Count > 0
+            ? header[0]
+            : context.Request.Query[ApiKeyGuard.QueryName].FirstOrDefault();
+
+        return guard.Accepts(presented);
+    }
 
     private static ClientDecodeSupport ToClientSupport(ClientDecodeSupportRequest? request)
     {

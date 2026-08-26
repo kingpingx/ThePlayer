@@ -156,13 +156,24 @@ rebinding, and it defeats address filtering by design rather than by accident.
 FFmpeg that instead of the name, which changes what is passed to every pipeline. Worth doing before
 this is exposed to an untrusted audience rather than a demo one.
 
-### There is still no authentication
+### The key is a bearer token in a browser
 
-Address filtering bounds *where* the server will connect. It does nothing about *who* may ask. Any
-visitor can start a broadcast, and from Phase 4 read the host's CPU and GPU load.
+Authentication exists as of Phase 6, and it is an API key rather than anything with sessions or
+identities. That is the right size for this — one operator, one deployment — but it has two
+consequences worth stating rather than discovering.
 
-*Mitigation:* the API key in Phase 6. Filtering makes a public demo defensible; it does not make
-the instance private.
+**It lives in `localStorage`.** Anything with script access to the page can read it, which is the
+same exposure a session cookie without `HttpOnly` has. The alternative is retyping it on every
+reload, and the practical result of *that* is people choosing short keys.
+
+**Two of the endpoints accept it in the query string.** `EventSource` and `WebSocket` cannot set
+headers at all, so a header-only scheme would leave the metrics stream either unreachable from a
+browser or unprotected. Query strings reach proxy logs and browser history, so this is a concession
+rather than a design.
+
+*The upgrade path, not built:* a short-lived ticket issued by an authenticated request and spent on
+the stream. It removes the long-lived secret from the URL without needing a session layer. Worth
+doing before this faces an audience that is not you.
 
 ---
 
@@ -176,12 +187,36 @@ the instance private.
 | Metrics stream | open | open | behind auth |
 | Logging | Debug | Information | Warning, structured |
 
+`ApiKey:Required` is what turns it on, and `appsettings.Production.json` sets it. Keys come from the
+environment — `ApiKey__Keys__0` — never from a committed file. More than one is accepted so a key
+can be rotated without a window where neither the old nor the new one works.
+
+**The host refuses to start** if a key is required and none is configured. That is one missing
+environment variable away at any time, and the symptom otherwise — every request refused — reads
+like a client problem from every angle except the server's.
+
+### What is guarded, and what is not
+
+| | Guarded | Why |
+|---|---|---|
+| `POST /api/watch`, `DELETE /api/watch/{id}`, `GET /api/broadcasts` | Yes | `fetch` can set a header |
+| `GET /api/metrics/stream` | Yes | Header, or `?key=` where `EventSource` cannot set one |
+| `GET /api/health` | **Reachable, reduced** | A liveness probe that needs a secret ends up switched off |
+| `WS /ws/frames/{viewerId}` | **By capability** | See below |
+| The player itself | No | A 401 in place of the page that could ask for a key helps nobody |
+
+`/api/health` answers everyone with `{healthy, environment}` and nothing else. The full body
+inventories the FFmpeg build, every acceleration profile on the machine, and what has recently
+failed on it — which is not something to hand an anonymous caller on a public host.
+
+The frame socket is authorised by the viewer id in its path rather than by the key. A browser cannot
+put a header on a `WebSocket` either, and that id is already a capability: 64 bits of randomness,
+minted only by an authorised watch call. Using it as the credential is a better fit than putting the
+long-lived secret into a second URL.
+
 Server resource metrics are information disclosure — they describe the host's hardware and load —
 so `/api/metrics/stream` follows the same split as everything else rather than being open by
-default.
-
-As of Phase 4 that endpoint exists and, like everything else, **is not yet behind auth in any
-environment**. Two things about it are worth stating plainly rather than leaving to be discovered:
+default. Two things about it are worth stating plainly rather than leaving to be discovered:
 
 - **What it tells an anonymous caller.** Core count, installed memory, GPU model class by inference,
   and the machine's load second by second. It carries no address, not even a redacted one — the

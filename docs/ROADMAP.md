@@ -512,7 +512,7 @@ near zero on `ClientDecoded`, client decode time doing the opposite and reaching
 
 ---
 
-# Phase 6 — Deployment and hardening · `v1.0.0`
+# Phase 6 — Deployment and hardening · `v1.0.0` · **done**
 
 **Goal:** run it somewhere other than a development machine, safely.
 
@@ -560,11 +560,48 @@ metrics describe the host's hardware and load.
 
 ## Verification
 
-- `docker compose up` on Linux serves all three modes to a remote browser on the LAN, with the
-  resource monitor still reporting GPU from inside the container.
-- The Windows native path still works.
-- Killing the server — including with `taskkill /F` — leaves no orphaned FFmpeg, MediaMTX or
-  `nvidia-smi` processes.
+**Partly done.** What could be checked on this machine was, and what could not is named rather than
+implied.
+
+- **The orphan gap is closed, and this is the one that mattered.** With a broadcast running —
+  two FFmpeg processes and MediaMTX — the server was killed with `taskkill /F`, which runs no
+  cleanup code of any kind. Afterwards: zero FFmpeg, zero MediaMTX. That is the Job Object doing
+  it, not our teardown, because none of ours ran.
+- **Auth behaves as designed**, against a live server:
+
+  ```
+  health, no key        {"healthy":false,"environment":"Development"}
+  health, with key      profiles: [h264_nvenc, h264_qsv, libx264]
+  broadcasts, no key    401
+  broadcasts, wrong key 401
+  broadcasts, right key 200
+  metrics ?key=…        streaming
+  metrics, no key       401
+  ```
+
+- **The misconfiguration guard works**: a host that requires a key with none configured refuses to
+  start, rather than serving a wall of 401s.
+
+**Not verified here**, and honestly so:
+
+- `docker compose up` on a Linux host with an NVIDIA card. This machine is Windows, where Docker
+  Desktop NATs container traffic and breaks ICE by design — the same reason the compose file
+  targets Linux in the first place. The file is written against the Dockerfile that *was* built and
+  run in Phase 6's earlier slice, but the GPU passthrough and host networking are untested.
+- WebRTC to a browser on another machine on the LAN.
+
+## What building it changed
+
+- **`PR_SET_PDEATHSIG` cannot be set from .NET.** It has to be set by the child between `fork` and
+  `exec`, and `Process.Start` offers no hook in that window. Linux therefore launches through
+  `setpriv --pdeathsig`, which does exactly that and then execs the real command. Where `setpriv`
+  is missing it says so once — and in a container the point is close to moot, since the app is PID 1
+  and the namespace goes with it.
+- **The awkward part of an API key is the transport, not the comparison.** `EventSource` and
+  `WebSocket` cannot set headers, which is most of why the design here is shaped as it is: a query
+  parameter for the metrics stream, and the viewer id as the capability for the frame socket.
+- **Health had to stay reachable.** A liveness probe that needs a secret is one that ends up
+  switched off, so it answers everyone — with the verdict, and nothing about the machine.
 
 ---
 

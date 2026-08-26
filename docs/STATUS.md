@@ -6,15 +6,15 @@ Where the project actually is, and where to pick it up.
 what is **built**, what is **not**, and what the next hour of work should be. Update it when a phase
 lands.
 
-*Last verified: 27 August 2026, on the branch that lands Phase 5.*
+*Last verified: 27 August 2026, on the branch that lands Phase 6.*
 
 ---
 
 ## Where things stand
 
-**Six phases done, one slice of a seventh.** An RTSP feed or a video file plays in a browser
-whatever codec it is in; the browser decodes everything, something, or nothing at all, as you
-choose; and the page shows what each choice costs at both ends while it happens.
+**All seven phases done.** An RTSP feed or a video file plays in a browser whatever codec it is
+in; the browser decodes everything, something, or nothing at all, as you choose; the page shows what
+each choice costs at both ends while it happens; and a deployment can require a key for any of it.
 
 Phase 5 finished the set. All three modes on one address, one reading of the metrics feed:
 
@@ -36,13 +36,12 @@ the server pays most for. It is now something to look at rather than a claim.
 | ✅ | 3 · Conversion | `v0.4.0` | Done — **not yet tagged** |
 | ✅ | 4 · Server metrics | `v0.5.0` | Done — **not yet tagged** |
 | ✅ | 5 · Full server decoding | `v0.6.0` | Done — **not yet tagged** |
-| 🟡 | 6 · Deployment *(partial)* | — | Container, Fly config and address policy done. **Auth not done.** |
-| ⬜ | 6 · Hardening *(rest)* | `v1.0.0` | Auth, process lifetime, docs |
+| ✅ | 6 · Deployment and hardening | `v1.0.0` | Done — **not yet tagged** |
 
-**261 tests, all passing** — 238 backend (Domain 38, Application 96, Infrastructure 94,
-Architecture 5, Api 5) and 23 in the player.
+**286 tests, all passing** — 263 backend (Domain 38, Application 110, Infrastructure 94,
+Architecture 5, Api 16) and 23 in the player.
 
-Roughly 8,580 lines of C# across four projects, plus a 27-file Angular workspace.
+Roughly 9,200 lines of C# across four projects, plus a 29-file Angular workspace.
 
 ### Nothing returns `501` any more
 
@@ -59,7 +58,7 @@ browser has no decoder for that" — which is permanent, actionable, and a `400`
 ./tools/fetch-mediamtx.sh           # Linux / macOS
 
 dotnet build
-dotnet test                          # expect 238 passing
+dotnet test                          # expect 263 passing
 
 # Terminal 1 - the API. Launches and supervises MediaMTX itself.
 dotnet run --project src/ThePlayer.Api          # http://localhost:5172
@@ -131,18 +130,25 @@ and a failed query are different facts that produce the same number if you let t
 `VideoDecoder` in it, and `PictureOptions` for the bandwidth. A small phase because Phase 2's
 pipeline was parameterised by its arguments and its reader, so the third mode edited neither.
 
-**Phase 6, partially — Deployment.** A container carrying everything, `fly.toml`, and `AddressGuard`,
-which bounds what the server will dial. Verified by building and running the image, not by
-inspection.
+**Phase 6 — Deployment and hardening.** A container carrying everything, `fly.toml`,
+`docker-compose.yml`, and `AddressGuard`, which bounds what the server will dial. An API key that
+Production requires and the host refuses to start without. And the fix for the oldest known gap in
+the project: children now die with the server, enforced by the kernel rather than by our cleanup
+code — which is the point, since cleanup code does not run on a hard kill.
 
 ---
 
 ## What is left
 
-### Phase 6 — The rest of hardening · `v1.0.0` · **next, and all that is left**
+### Nothing. The roadmap is finished.
 
-**Auth is the one that matters** and is the reason this is not simply "deployable". Also: killing
-child processes with the parent (Job Object / `PR_SET_PDEATHSIG`), and the docs.
+What is left is not a phase. Two things were verified only by reasoning rather than by running,
+and both are named in the debt table below: a Linux `docker compose up` with a real GPU, and WebRTC
+to a browser on another machine. Everything else in this document was checked by doing it.
+
+If more is wanted, [ROADMAP.md](ROADMAP.md#still-out-of-scope) lists what was deliberately left out
+— transport controls, audio, recording, WebTransport, multiple cameras on a page — each with the
+reason it was a decision rather than an omission.
 
 ---
 
@@ -152,10 +158,10 @@ Known, deliberate, and written down rather than discovered later.
 
 | | Where it is documented |
 |---|---|
-| **No authentication.** Anyone who reaches the API can start a broadcast — and since Phase 3, start an encode on the host's GPU — and from Phase 4 read its CPU and GPU load. | [SECURITY.md](SECURITY.md), [DEPLOYMENT.md](DEPLOYMENT.md) |
+| **The key is a bearer token in a browser.** Kept in `localStorage`, and two endpoints accept it in the query string because `EventSource` and `WebSocket` cannot set headers. Query strings reach proxy logs. The upgrade path is a short-lived ticket, and it is not built. | [SECURITY.md](SECURITY.md) |
+| **`docker compose up` is unverified.** Written against the Dockerfile that was built and run, but the GPU passthrough and host networking need a Linux host with an NVIDIA card — this machine is Windows, where Docker Desktop breaks ICE by design. | [HARDWARE.md](HARDWARE.md) |
 | **Conversion is unbounded.** Nothing caps how many transcodes run at once. The fallback keeps a machine at its session limit *working*, by dropping to software, but a host asked for twenty conversions will accept all twenty and grind. | Here. A concurrency limit belongs with auth in Phase 6 |
 | **DNS rebinding.** `AddressGuard` resolves a name; FFmpeg resolves it again. A name that changes its answer between the two slips through. | [SECURITY.md](SECURITY.md) |
-| **Orphaned children.** A hard kill of the API leaves MediaMTX running. Mitigated by adoption, not fixed. | [ARCHITECTURE.md](ARCHITECTURE.md) |
 | **FFmpeg command lines are visible** to other processes of the same user, credentials included. | [SECURITY.md](SECURITY.md) |
 | **WebRTC on Fly is unverified.** Docker Desktop NATs on Windows, which breaks ICE locally by design, so it needs a real deploy plus the `WebRtcAdditionalHosts` secret. | [DEPLOYMENT.md](DEPLOYMENT.md) |
 | **GPU metrics are NVIDIA-only.** Intel and AMD machines get an availability state and a reason instead of figures — `intel_gpu_top` and `rocm-smi` are Linux-only and usually need privilege, and Windows exposes no per-engine split. CPU and per-broadcast figures work everywhere. | [PROTOCOL.md](PROTOCOL.md) |
@@ -173,8 +179,8 @@ multiple cameras on one page. [README](../README.md#roadmap) says why for each.
 
 ## Loose ends you can close in minutes
 
-- **Cut `v0.4.0`, `v0.5.0` and `v0.6.0`.** Phases 3 to 5 have landed and each has its CHANGELOG
-  section written — tag and push, and the releases publish themselves.
+- **Cut `v0.4.0` through `v1.0.0`.** Phases 3 to 6 have landed and each has its CHANGELOG section
+  written — tag and push, and the releases publish themselves.
 - **Publish the earlier GitHub releases.** All three tags are pushed but have no release objects.
   Actions → *Release* → *Run workflow* backfills them from the CHANGELOG.
 - **Deploy to Fly**, if the demo is wanted — [DEPLOYMENT.md](DEPLOYMENT.md) has the four commands,

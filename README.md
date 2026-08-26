@@ -8,12 +8,12 @@ Chrome, whatever codec it happens to be in. An H.265 feed plays in a browser tha
 H.265. A browser that *can* decode H.265 gets the original bytes untouched, and the server's
 conversion cost drops to zero.
 
-> **Status:** Phase 2 (`v0.3.0`) — client-side decoding. **H.265 now plays in a browser that can
-> decode it, with the server copying bytes and doing no codec work at all** — which is the whole
-> point of the project, and the first phase where you can see it. H.264 and H.265 both play over
-> WebRTC (`ServerAssisted`) or straight to WebCodecs over a socket (`ClientDecoded`). What is left
-> is conversion for browsers that *cannot* decode the source (Phase 3) and full server decoding
-> (Phase 5). See [Roadmap](#roadmap).
+> **Status:** Phase 3 (`v0.4.0`) — conversion. **H.265 now plays everywhere.** A browser that can
+> decode it gets the original bytes and the server does no codec work at all; one that cannot gets
+> the same feed converted, on whichever engine this machine turns out to have. Both can run from the
+> same camera at once, on separate pipelines, and `/api/broadcasts` shows the difference. What is
+> left is server-side metrics (Phase 4), full server decoding (Phase 5) and authentication
+> (Phase 6). See [Roadmap](#roadmap).
 
 ---
 
@@ -106,7 +106,7 @@ No camera to hand? Make one of each:
 ffmpeg -f lavfi -i "testsrc2=size=1280x720:rate=25:duration=30" \
        -c:v libx264 -preset ultrafast -pix_fmt yuv420p -g 50 sample-h264.mp4
 
-# H.265 - the case this project exists for. Returns 501 until Phase 2/3 land.
+# H.265 - the case this project exists for. Plays as of Phase 3, converted or not.
 ffmpeg -f lavfi -i "testsrc2=size=1280x720:rate=25:duration=30" \
        -c:v libx265 -preset ultrafast -pix_fmt yuv420p -g 50 -tag:v hvc1 sample-h265.mp4
 ```
@@ -225,7 +225,7 @@ other processes of the same user, and the server will connect to whatever addres
 | ✅ 0 | Foundation — solution, `MediaAddress`, MediaMTX supervision, health, CI | `v0.1.0` |
 | ✅ 1 | First pixels — H.264 RTSP feeds and files play via WebRTC | `v0.2.0` |
 | ✅ 2 | Client-side decoding and the capability panel — **H.265 plays on browsers that can decode it** | `v0.3.0` |
-| 3 | H.265 conversion — **it plays everywhere**, converted only for clients that need it | `v0.4.0` |
+| ✅ 3 | H.265 conversion — **it plays everywhere**, converted only for clients that need it | `v0.4.0` |
 | 4 | Server CPU and GPU live in the browser | `v0.5.0` |
 | 5 | Full server decoding and the three-way comparison | `v0.6.0` |
 | 6 | Docker, auth, docs | `v1.0.0` |

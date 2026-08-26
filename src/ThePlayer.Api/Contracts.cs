@@ -14,7 +14,8 @@ public sealed record HealthResponse(
     bool Healthy,
     string Environment,
     MediaServerHealth MediaServer,
-    HardwareHealth Hardware);
+    HardwareHealth Hardware,
+    IReadOnlyList<EncoderFallbackInfo> EncoderFallbacks);
 
 /// <summary>State of the MediaMTX child process.</summary>
 public sealed record MediaServerHealth(
@@ -33,6 +34,21 @@ public sealed record HardwareHealth(
     string PreferredProfile,
     IReadOnlyList<AccelerationProfileInfo> Profiles,
     IReadOnlyList<string> DecodableCodecs);
+
+/// <summary>
+/// One time an encoder that was detected at startup would not open when a broadcast needed it.
+/// </summary>
+/// <remarks>
+/// Empty on a machine where nothing has ever fallen back, which is the normal case. A non-empty
+/// list is the only thing in this response that distinguishes a host quietly encoding on the CPU
+/// from one using the GPU that <c>profiles</c> still claims is available.
+/// </remarks>
+public sealed record EncoderFallbackInfo(
+    string FailedProfile,
+    string FailedEncoder,
+    string? ReplacementProfile,
+    string Reason,
+    DateTimeOffset At);
 
 /// <summary>One confirmed-usable acceleration profile.</summary>
 public sealed record AccelerationProfileInfo(

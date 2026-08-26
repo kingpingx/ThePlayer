@@ -214,5 +214,13 @@ public static class Endpoints
                 .ToList(),
             DecodableCodecs: health.Hardware.DecodableCodecs
                 .Select(codec => codec.ToString())
-                .ToList()));
+                .ToList()),
+        EncoderFallbacks: health.EncoderFallbacks
+            .Select(fallback => new EncoderFallbackInfo(
+                FailedProfile: fallback.FailedProfile,
+                FailedEncoder: fallback.FailedEncoder,
+                ReplacementProfile: fallback.ReplacementProfile,
+                Reason: fallback.Reason,
+                At: fallback.At))
+            .ToList());
 }

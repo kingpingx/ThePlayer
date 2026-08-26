@@ -53,6 +53,12 @@ public sealed class MediaMtxOptions
 
     public string WebRtcBaseUrl => $"http://{NormaliseHost(WebRtcAddress)}";
 
+    /// <summary>
+    /// Where a publisher pushes converted video in. Always loopback: the transcoder is a child of
+    /// this process and MediaMTX is beside it, so this traffic never leaves the machine.
+    /// </summary>
+    public string RtspBaseUrl => $"rtsp://{NormaliseHost(RtspAddress)}";
+
     /// <summary>A bare ":8889" means "all interfaces"; to *call* it we need a real host.</summary>
     private static string NormaliseHost(string address) =>
         address.StartsWith(':') ? $"127.0.0.1{address}" : address;

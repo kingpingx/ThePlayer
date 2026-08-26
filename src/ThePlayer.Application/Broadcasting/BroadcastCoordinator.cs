@@ -85,6 +85,7 @@ public sealed class BroadcastCoordinator(
     IMediaServer mediaServer,
     IHardwareInspector hardwareInspector,
     IFramePipeline framePipeline,
+    IPublishingPipeline publishingPipeline,
     BroadcastPlanner planner,
     AddressGuard addressGuard,
     IOptions<BroadcastOptions> options,
@@ -107,7 +108,24 @@ public sealed class BroadcastCoordinator(
     /// </summary>
     private readonly Dictionary<string, FrameBroadcaster> _frameBroadcasters = [];
 
+    /// <summary>
+    /// The transcoders feeding the edge server, for <c>ServerAssisted</c> streams that had to be
+    /// converted. Kept separately from <see cref="_frameBroadcasters"/> because they are not the
+    /// same thing: no frame of these passes through this process, so there is nothing to fan out -
+    /// only a child process whose life has to match the broadcast's.
+    /// </summary>
+    private readonly Dictionary<string, IPublishedStream> _publishers = [];
+
     private readonly record struct CachedFormat(VideoFormat Format, DateTimeOffset ExpiresAt);
+
+    /// <summary>
+    /// Whatever was started for a broadcast, if anything. Both are null for the pass-through
+    /// WebRTC path, where MediaMTX pulls the source itself and this process owns no process at all.
+    /// </summary>
+    private readonly record struct RunningPipeline(FrameBroadcaster? Frames, IPublishedStream? Publisher)
+    {
+        public static RunningPipeline None => default;
+    }
 
     /// <summary>Starts watching, or joins whoever is already watching the same thing.</summary>
     public async Task<WatchTicket> AttachAsync(
@@ -135,7 +153,7 @@ public sealed class BroadcastCoordinator(
         var viewerId = Guid.NewGuid().ToString("n")[..16];
 
         // Fast path: something is already running for this exact plan.
-        FrameBroadcaster? finished = null;
+        var finished = RunningPipeline.None;
 
         await _gate.WaitAsync(cancellationToken);
         try
@@ -147,7 +165,9 @@ public sealed class BroadcastCoordinator(
                     // A file that already played to its last frame. Watching it again means
                     // starting it again, not joining a broadcast with nothing left to deliver.
                     _broadcasts.Remove(key);
-                    _frameBroadcasters.Remove(key, out finished);
+                    _frameBroadcasters.Remove(key, out var endedFrames);
+                    _publishers.Remove(key, out var endedPublisher);
+                    finished = new RunningPipeline(endedFrames, endedPublisher);
                 }
                 else
                 {
@@ -184,9 +204,14 @@ public sealed class BroadcastCoordinator(
             var broadcast = new Broadcast(key, address, format, plan, mediaServerPath: key);
             broadcast.MarkLive();
 
-            if (started is not null)
+            if (started.Frames is { } frames)
             {
-                _frameBroadcasters[key] = started;
+                _frameBroadcasters[key] = frames;
+            }
+
+            if (started.Publisher is { } publisher)
+            {
+                _publishers[key] = publisher;
             }
 
             broadcast.Attach(viewerId, clock.GetUtcNow());
@@ -212,8 +237,14 @@ public sealed class BroadcastCoordinator(
     /// Brings a broadcast into being: published on the edge server for WebRTC, or a frame pipeline
     /// of our own for the socket modes.
     /// </summary>
-    /// <returns>The broadcaster to register, or <c>null</c> for the WebRTC path.</returns>
-    private async Task<FrameBroadcaster?> StartPipelineAsync(
+    /// <remarks>
+    /// Three shapes, and which one applies is entirely the plan's doing. Pass-through WebRTC costs
+    /// this process nothing at all - MediaMTX pulls the camera and serves it, and no child process
+    /// is ours. Converted WebRTC needs a transcoder, because MediaMTX will not re-encode. The
+    /// socket modes need a frame pipeline either way.
+    /// </remarks>
+    /// <returns>Whatever now has to be shut down when the broadcast ends.</returns>
+    private async Task<RunningPipeline> StartPipelineAsync(
         string key,
         MediaAddress address,
         BroadcastPlan plan,
@@ -222,21 +253,43 @@ public sealed class BroadcastCoordinator(
     {
         if (plan.Mode == PlaybackMode.ServerAssisted)
         {
-            // MediaMTX pulls the source itself and serves it over WebRTC; this process never sees
-            // a frame. Publishing is idempotent, so a lost race needs no undoing.
-            await mediaServer.PublishAsync(key, address, cancellationToken);
-            return null;
+            if (!plan.RequiresConversion)
+            {
+                // MediaMTX pulls the source itself and serves it over WebRTC; this process never
+                // sees a frame. Publishing is idempotent, so a lost race needs no undoing.
+                await mediaServer.PublishAsync(key, address, cancellationToken);
+                return RunningPipeline.None;
+            }
+
+            // Reserving comes first: a transcoder that pushes at a path MediaMTX has not been told
+            // about is refused at the handshake, which reads as an encoder failure and would send
+            // the fallback walking the whole ranking for a reason that has nothing to do with it.
+            var target = await mediaServer.ReservePublishPathAsync(key, cancellationToken);
+
+            var published = await publishingPipeline.StartAsync(
+                address,
+                plan,
+                format,
+                target,
+                cancellationToken);
+
+            return new RunningPipeline(Frames: null, published);
         }
 
         var stream = await framePipeline.StartAsync(address, plan, format, cancellationToken);
-        return new FrameBroadcaster(stream, key, logger);
+        return new RunningPipeline(new FrameBroadcaster(stream, key, logger), Publisher: null);
     }
 
-    private static async Task DiscardAsync(FrameBroadcaster? broadcaster)
+    private static async Task DiscardAsync(RunningPipeline pipeline)
     {
-        if (broadcaster is not null)
+        if (pipeline.Frames is { } frames)
         {
-            await broadcaster.DisposeAsync();
+            await frames.DisposeAsync();
+        }
+
+        if (pipeline.Publisher is { } publisher)
+        {
+            await publisher.DisposeAsync();
         }
     }
 
@@ -329,7 +382,7 @@ public sealed class BroadcastCoordinator(
     {
         var now = clock.GetUtcNow();
         List<Broadcast> expired;
-        var pipelines = new List<FrameBroadcaster>();
+        var pipelines = new List<RunningPipeline>();
 
         await _gate.WaitAsync(cancellationToken);
         try
@@ -345,6 +398,17 @@ public sealed class BroadcastCoordinator(
                 }
             }
 
+            // The same reasoning for a transcoder: the file ran out, or the process died. Either
+            // way MediaMTX has nothing to serve, so a viewer joining now would get a WHEP URL for
+            // a path with no publisher and an indefinite black screen.
+            foreach (var (key, publisher) in _publishers)
+            {
+                if (publisher.HasEnded && _broadcasts.TryGetValue(key, out var ended))
+                {
+                    ended.MarkEnded(now);
+                }
+            }
+
             expired = _broadcasts.Values
                 .Where(broadcast => broadcast.ShouldStop(now, _options.Linger))
                 .ToList();
@@ -352,10 +416,12 @@ public sealed class BroadcastCoordinator(
             foreach (var broadcast in expired)
             {
                 _broadcasts.Remove(broadcast.Key);
+                _frameBroadcasters.Remove(broadcast.Key, out var broadcaster);
+                _publishers.Remove(broadcast.Key, out var publisher);
 
-                if (_frameBroadcasters.Remove(broadcast.Key, out var broadcaster))
+                if (broadcaster is not null || publisher is not null)
                 {
-                    pipelines.Add(broadcaster);
+                    pipelines.Add(new RunningPipeline(broadcaster, publisher));
                 }
             }
 
@@ -374,15 +440,15 @@ public sealed class BroadcastCoordinator(
 
         // Tearing down is I/O, so it happens outside the lock. The broadcasts are already
         // unreachable, so nothing can attach to them in the meantime.
-        foreach (var broadcaster in pipelines)
+        foreach (var pipeline in pipelines)
         {
             try
             {
-                await broadcaster.DisposeAsync();
+                await DiscardAsync(pipeline);
             }
             catch (Exception ex)
             {
-                logger.LogWarning(ex, "Could not stop a frame pipeline cleanly.");
+                logger.LogWarning(ex, "Could not stop a pipeline cleanly.");
             }
         }
 
@@ -427,7 +493,8 @@ public sealed class BroadcastCoordinator(
     /// </remarks>
     private bool HasFinished(string key, Broadcast broadcast) =>
         broadcast.IsFinished ||
-        (_frameBroadcasters.TryGetValue(key, out var broadcaster) && broadcaster.HasEnded);
+        (_frameBroadcasters.TryGetValue(key, out var broadcaster) && broadcaster.HasEnded) ||
+        (_publishers.TryGetValue(key, out var publisher) && publisher.HasEnded);
 
     private async Task<VideoFormat> GetFormatAsync(MediaAddress address, CancellationToken cancellationToken)
     {
@@ -485,9 +552,9 @@ public sealed class BroadcastCoordinator(
     /// letting a viewer attach to a pipeline that will never produce a frame.
     /// </summary>
     /// <remarks>
-    /// Phase 2 added the frame socket, so client-side decoding of a stream the browser already
-    /// understands now works. What remains is conversion (Phase 3) and full server decoding
-    /// (Phase 5).
+    /// Phase 2 added the frame socket and Phase 3 the encoder, so every plan the planner produces
+    /// is now executable except one: full server decoding, which delivers pictures rather than a
+    /// compressed stream and needs a different reader to do it.
     /// </remarks>
     private static void RejectIfNotYetImplemented(BroadcastPlan plan)
     {
@@ -495,13 +562,6 @@ public sealed class BroadcastCoordinator(
         {
             throw new NotSupportedException(
                 "Full server decoding arrives in Phase 5. Use ClientDecoded or ServerAssisted for now.");
-        }
-
-        if (plan.RequiresConversion)
-        {
-            throw new NotSupportedException(
-                "This stream has to be converted before this client can play it, and conversion " +
-                "arrives in Phase 3. A source your browser can already decode plays today.");
         }
     }
 }

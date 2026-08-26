@@ -15,7 +15,7 @@ Everything is JSON, camel-cased, over HTTP. Three transports:
 
 ---
 
-## Status: Phase 2
+## Status: Phase 3
 
 `GET /api/health`, `POST /api/watch`, `DELETE /api/watch/{viewerId}`, `GET /api/broadcasts` and
 `WS /ws/frames/{viewerId}` all exist. The metrics stream is specified below as it will be built, so
@@ -53,7 +53,8 @@ either way.
       }
     ],
     "decodableCodecs": ["H264", "H265", "Vp8", "Vp9", "Av1", "Mjpeg"]
-  }
+  },
+  "encoderFallbacks": []
 }
 ```
 
@@ -64,9 +65,40 @@ either way.
 | `mediaServer.restartCount` | A climbing number is the signal that something is wrong even while `state` reads `Running`. |
 | `mediaServer.error` | Already scrubbed of credentials. |
 | `hardware.profiles` | Only profiles **verified by actually encoding with them**, best first. See [ARCHITECTURE.md](ARCHITECTURE.md#detection-never-assumption). |
+| `encoderFallbacks` | Empty on a healthy host. See below. |
 
 `ffmpegVersion` is spelled out explicitly rather than derived: the default camel-case policy turns
 `FFmpegVersion` into `fFmpegVersion`, which is not a name anyone should have to bind to.
+
+### `encoderFallbacks`
+
+`hardware.profiles` says what was detected **at startup**. That is a claim with a shelf life:
+verifying an encoder proves it exists, not that a session can be opened an hour later. NVENC allows
+three to eight concurrent sessions on a consumer card, so the fourth broadcast fails at
+`avcodec_open2` while the profile list goes on advertising it.
+
+This array is what closes that gap — most recent first, bounded, and the only field in the response
+that distinguishes a host quietly encoding on the CPU from one using the GPU above it:
+
+```json
+"encoderFallbacks": [
+  {
+    "failedProfile": "NVIDIA NVENC/NVDEC",
+    "failedEncoder": "h264_nvenc",
+    "replacementProfile": "Intel Quick Sync",
+    "reason": "[h264_nvenc @ 000001bb864a3fc0] InitializeEncoder failed: invalid param (8): Frame Dimension less than the minimum supported value.",
+    "at": "2026-08-25T09:58:14.2170000+00:00"
+  }
+]
+```
+
+| Field | Notes |
+|---|---|
+| `replacementProfile` | What ran instead, or `null` when the ranking ran out and the broadcast failed. |
+| `reason` | One line of FFmpeg output, already scrubbed of credentials. The line naming the encoder is preferred over the first one, which is often the decoder complaining about something else. |
+
+A non-empty array is not by itself a failure — falling back is the system working. The same profile
+appearing repeatedly is the signal worth acting on.
 
 ---
 

@@ -29,6 +29,7 @@ public class BroadcastCoordinatorTests
     private readonly IMediaServer _mediaServer = Substitute.For<IMediaServer>();
     private readonly IHardwareInspector _hardware = Substitute.For<IHardwareInspector>();
     private readonly IFramePipeline _framePipeline = Substitute.For<IFramePipeline>();
+    private readonly IPublishingPipeline _publishingPipeline = Substitute.For<IPublishingPipeline>();
     private readonly FakeTimeProvider _clock = new(DateTimeOffset.Parse("2026-01-01T00:00:00Z"));
 
     private readonly BroadcastCoordinator _coordinator;
@@ -44,6 +45,17 @@ public class BroadcastCoordinatorTests
         _mediaServer.WhepUrlFor(Arg.Any<string>())
             .Returns(callInfo => new Uri($"http://localhost:8889/{callInfo.Arg<string>()}/whep"));
 
+        _mediaServer.ReservePublishPathAsync(Arg.Any<string>(), Arg.Any<CancellationToken>())
+            .Returns(callInfo => new Uri($"rtsp://127.0.0.1:8554/{callInfo.Arg<string>()}"));
+
+        _publishingPipeline.StartAsync(
+                Arg.Any<MediaAddress>(),
+                Arg.Any<BroadcastPlan>(),
+                Arg.Any<VideoFormat>(),
+                Arg.Any<Uri>(),
+                Arg.Any<CancellationToken>())
+            .Returns(_ => new RunningPublisher());
+
         _framePipeline.StartAsync(
                 Arg.Any<MediaAddress>(),
                 Arg.Any<BroadcastPlan>(),
@@ -56,6 +68,7 @@ public class BroadcastCoordinatorTests
             _mediaServer,
             _hardware,
             _framePipeline,
+            _publishingPipeline,
             new BroadcastPlanner(),
 
             // Development defaults: the guard lets everything through, so these tests stay about
@@ -86,6 +99,27 @@ public class BroadcastCoordinatorTests
         }
 
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    }
+
+    /// <summary>
+    /// A transcoder that started cleanly and keeps running. Like <see cref="SilentFrameStream"/>,
+    /// it produces nothing: no frame of a published stream passes through this process anyway, so
+    /// there is nothing to fake beyond "still alive" and "shut down when told".
+    /// </summary>
+    private sealed class RunningPublisher : IPublishedStream
+    {
+        public AccelerationProfile Acceleration => AccelerationProfile.Software;
+
+        public bool HasEnded { get; private set; }
+
+        public int DisposeCount { get; private set; }
+
+        public ValueTask DisposeAsync()
+        {
+            DisposeCount++;
+            HasEnded = true;
+            return ValueTask.CompletedTask;
+        }
     }
 
     private static MediaAddress Address(string path = H264File) =>
@@ -390,15 +424,161 @@ public class BroadcastCoordinatorTests
         }
 
         [Fact]
-        public async Task A_stream_needing_conversion_names_the_phase_that_will_deliver_it()
+        public async Task A_stream_the_browser_cannot_decode_is_converted_rather_than_refused()
+        {
+            // Phase 3. An H.265 file and a browser that only does H.264: the planner says convert,
+            // and unlike every phase before this one the answer is now carried out.
+            _inspector.InspectAsync(Arg.Any<MediaAddress>(), Arg.Any<CancellationToken>())
+                .Returns(new VideoFormat(VideoCodec.H265, 1920, 1080, 25, Duration: null));
+
+            var ticket = await _coordinator.AttachAsync(Address(), PlaybackMode.ClientDecoded, Capable());
+
+            ticket.Converted.Should().BeTrue("the browser reported no H.265 decoder");
+            ticket.FrameSocketPath.Should().Be($"/ws/frames/{ticket.ViewerId}");
+
+            await _framePipeline.Received(1).StartAsync(
+                Arg.Any<MediaAddress>(),
+                Arg.Is<BroadcastPlan>(plan =>
+                    plan.RequiresConversion && plan.OutputCodec == VideoCodec.H264),
+                Arg.Any<VideoFormat>(),
+                Arg.Any<CancellationToken>());
+        }
+    }
+
+    /// <summary>
+    /// Conversion for the WebRTC mode, which is the half of Phase 3 that MediaMTX cannot do for
+    /// itself. It will pull a camera; it will not re-encode one.
+    /// </summary>
+    public class ConvertingForWebRtc : BroadcastCoordinatorTests
+    {
+        private Task<WatchTicket> AttachToH265Async()
         {
             _inspector.InspectAsync(Arg.Any<MediaAddress>(), Arg.Any<CancellationToken>())
                 .Returns(new VideoFormat(VideoCodec.H265, 1920, 1080, 25, Duration: null));
 
-            var act = async () => await AttachAsync();
+            return _coordinator.AttachAsync(
+                Address(),
+                PlaybackMode.ServerAssisted,
+                ClientDecodeSupport.None);
+        }
 
-            (await act.Should().ThrowAsync<NotSupportedException>())
-                .Which.Message.Should().Contain("Phase 3");
+        [Fact]
+        public async Task A_converted_stream_is_pushed_in_rather_than_pulled()
+        {
+            var ticket = await AttachToH265Async();
+
+            ticket.Converted.Should().BeTrue("H.265 cannot be relied on over WebRTC");
+            ticket.WhepUrl.Should().NotBeNull("it is still played through the edge server");
+
+            await _mediaServer.Received(1).ReservePublishPathAsync(
+                Arg.Any<string>(), Arg.Any<CancellationToken>());
+
+            await _publishingPipeline.Received(1).StartAsync(
+                Arg.Any<MediaAddress>(),
+                Arg.Is<BroadcastPlan>(plan => plan.RequiresConversion),
+                Arg.Any<VideoFormat>(),
+                Arg.Any<Uri>(),
+                Arg.Any<CancellationToken>());
+
+            // The pull path would have been wrong here: MediaMTX would fetch H.265 and hand it
+            // straight to a browser that cannot play it.
+            await _mediaServer.DidNotReceive().PublishAsync(
+                Arg.Any<string>(), Arg.Any<MediaAddress>(), Arg.Any<CancellationToken>());
+        }
+
+        [Fact]
+        public async Task A_stream_that_needs_no_conversion_still_costs_this_process_nothing()
+        {
+            // The thesis, stated as a test. An H.264 source in this mode must not start a
+            // transcoder: MediaMTX pulls it and serves it, and no FFmpeg of ours is involved.
+            await AttachAsync();
+
+            await _publishingPipeline.DidNotReceive().StartAsync(
+                Arg.Any<MediaAddress>(),
+                Arg.Any<BroadcastPlan>(),
+                Arg.Any<VideoFormat>(),
+                Arg.Any<Uri>(),
+                Arg.Any<CancellationToken>());
+
+            await _mediaServer.DidNotReceive().ReservePublishPathAsync(
+                Arg.Any<string>(), Arg.Any<CancellationToken>());
+        }
+
+        [Fact]
+        public async Task Two_viewers_of_the_same_converted_stream_share_one_transcoder()
+        {
+            // Sharing matters more here than anywhere else: a second transcoder means a second
+            // encode session, and on a consumer GPU there are only a handful of those.
+            var first = await AttachToH265Async();
+            var second = await AttachToH265Async();
+
+            second.ViewerId.Should().NotBe(first.ViewerId);
+            (await _coordinator.ListAsync()).Should().ContainSingle().Which.ViewerCount.Should().Be(2);
+
+            await _publishingPipeline.Received(1).StartAsync(
+                Arg.Any<MediaAddress>(),
+                Arg.Any<BroadcastPlan>(),
+                Arg.Any<VideoFormat>(),
+                Arg.Any<Uri>(),
+                Arg.Any<CancellationToken>());
+        }
+
+        [Fact]
+        public async Task The_transcoder_is_shut_down_with_the_broadcast()
+        {
+            // A transcoder that outlives its broadcast holds an encode session and a camera
+            // connection open for nothing, and nothing else in the system would ever reclaim it.
+            var publisher = new RunningPublisher();
+
+            _publishingPipeline.StartAsync(
+                    Arg.Any<MediaAddress>(),
+                    Arg.Any<BroadcastPlan>(),
+                    Arg.Any<VideoFormat>(),
+                    Arg.Any<Uri>(),
+                    Arg.Any<CancellationToken>())
+                .Returns(_ => publisher);
+
+            var ticket = await AttachToH265Async();
+            await _coordinator.DetachAsync(ticket.ViewerId);
+
+            publisher.DisposeCount.Should().Be(0, "the broadcast lingers before it stops");
+
+            _clock.Advance(Linger + TimeSpan.FromSeconds(1));
+            await _coordinator.SweepAsync();
+
+            publisher.DisposeCount.Should().Be(1);
+            (await _coordinator.ListAsync()).Should().BeEmpty();
+
+            await _mediaServer.Received().RemoveAsync(Arg.Any<string>(), Arg.Any<CancellationToken>());
+        }
+
+        [Fact]
+        public async Task A_transcoder_that_died_does_not_leave_a_broadcast_others_can_join()
+        {
+            // Without this a viewer arriving after the transcoder stopped is handed a WHEP URL for
+            // a path nothing is publishing to - an indefinite black screen with no error anywhere.
+            var dead = new RunningPublisher();
+            await dead.DisposeAsync();
+
+            _publishingPipeline.StartAsync(
+                    Arg.Any<MediaAddress>(),
+                    Arg.Any<BroadcastPlan>(),
+                    Arg.Any<VideoFormat>(),
+                    Arg.Any<Uri>(),
+                    Arg.Any<CancellationToken>())
+                .Returns(_ => dead);
+
+            var first = await AttachToH265Async();
+            var second = await AttachToH265Async();
+
+            second.ViewerId.Should().NotBe(first.ViewerId);
+
+            await _publishingPipeline.Received(2).StartAsync(
+                Arg.Any<MediaAddress>(),
+                Arg.Any<BroadcastPlan>(),
+                Arg.Any<VideoFormat>(),
+                Arg.Any<Uri>(),
+                Arg.Any<CancellationToken>());
         }
     }
 }

@@ -1,10 +1,11 @@
 # Roadmap — Phases 2 to 6
 
-Where the project is going, and the technical detail needed to build it.
+Where the project is going, and the technical detail it was built from.
 
-Phases 0 and 1 are done (`v0.1.0`, `v0.2.0`): the solution, the credential-safe `MediaAddress`,
-MediaMTX supervision, verified hardware detection, the watch endpoints, reference-counted
-broadcasts, and H.264 playback over WebRTC.
+Phases 0 to 3 are done — see [STATUS.md](STATUS.md) for what exists today. Their sections are kept
+below rather than deleted, because the reasoning in them is what the code was built from and is
+still the fastest way to understand why a decision was made. Where building something changed the
+plan, the section says so.
 
 Everything below has been checked against the real toolchain on this machine rather than assumed.
 Where a measurement contradicted the original design, the design changed — those places are marked
@@ -12,20 +13,20 @@ Where a measurement contradicted the original design, the design changed — tho
 
 ---
 
-## Prerequisite, still outstanding
+## Prerequisite, since satisfied
 
 ```powershell
 winget install OpenJS.NodeJS.LTS     # → Node 22.x
 ```
 
-Node 20.9.0 is below what any current Angular CLI accepts (Angular 19 needs `≥ 20.11.1`, Angular 22
-needs `≥ 22.22.3`). **Phase 2 cannot start without this** — it is the phase that scaffolds the
-player. The WHEP harness at `/` stands in until then, and remains afterwards as a dependency-free
-fallback.
+Node 20.9.0 was below what any current Angular CLI accepts (Angular 19 needs `≥ 20.11.1`, Angular 22
+needs `≥ 22.22.3`), and Phase 2 could not start without it — it is the phase that scaffolds the
+player. Kept here because it is still the first thing to do on a fresh machine. The WHEP harness at
+`/` stood in until then, and remains as a dependency-free fallback.
 
 ---
 
-# Phase 2 — Client-side decoding and the capability panel · `v0.3.0`
+# Phase 2 — Client-side decoding and the capability panel · `v0.3.0` · **done**
 
 **Goal:** the server stops touching the video. FFmpeg copies bytes, the browser decodes them with
 its own GPU through WebCodecs, and the UI shows what it can decode and why each mode is offered.
@@ -186,7 +187,7 @@ response, and no client-facing error.
 
 ---
 
-# Phase 3 — Video conversion · `v0.4.0`
+# Phase 3 — Video conversion · `v0.4.0` · **done**
 
 **Goal:** H.265 plays everywhere. Converted for clients that need it, passed through untouched for
 clients that do not.
@@ -249,12 +250,46 @@ class from either pipeline:
 
 ## Verification
 
-- An H.265 file plays in `ServerAssisted` (converted) and in `ClientDecoded` (passthrough on a
-  browser that reports H.265, converted on one that does not).
-- Forcing the probe to report no H.265 flips the planner to conversion — and `converted` in the
-  watch response says so.
-- Overriding the profile ranking to software confirms a graceful `libx264` fallback.
-- `nvidia-smi` shows encoder utilisation rise when and only when `converted` is true.
+**Done, against a real H.265 file, FFmpeg 8.0 and MediaMTX v1.20.1.**
+
+- An H.265 file plays in `ServerAssisted` — MediaMTX reported the path `ready`, `online`, and
+  carrying an **H264** track from an `rtspSession` publisher, which is the transcoder.
+- It plays in `ClientDecoded` both ways from the same source, at the same time: a browser claiming
+  H.265 got `hev1.1.6.L93.90` with `converted: false`, and one claiming only H.264 got
+  `avc1.640020` with `converted: true`. Two broadcasts, two pipelines, keys differing by one suffix.
+- The generated command lines were run against the sample directly and the output counted by NAL
+  type: 100 access unit delimiters for 100 frames, and an SPS at each of the two keyframes, on both
+  the software and the NVENC paths. That last part is what proves a late joiner can decode.
+- **The fallback was exercised end to end, not simulated.** Asking NVENC to encode a 32×32 stream
+  made it refuse with `InitializeEncoder failed: Frame Dimension less than the minimum supported
+  value`; the pipeline dropped to Quick Sync, the stream played, and `/api/health` reported the
+  downgrade with that line as its reason.
+
+Two things the verification could **not** establish on this machine, recorded rather than glossed:
+
+- The NVENC **session limit** — the case this fallback was designed for — needs a consumer GeForce.
+  This machine is a T550, which is professional silicon and has no cap, so the mechanism was proved
+  by a different refusal than the one that motivated it.
+- WebRTC playback of the converted stream in a browser was not exercised here; what was confirmed is
+  that MediaMTX has the H.264 track ready to serve. The WHEP handshake itself is unchanged since
+  Phase 1.
+
+## What building it changed
+
+- **The keyframe interval is derived, not fixed.** `-g 30` above assumes 30fps; at 10fps it is three
+  seconds of black screen before a joiner's decoder can start. It is now about two seconds' worth of
+  frames, whatever the source rate.
+- **AMF sets no `-hwaccel_output_format`.** The flag is the one that matters for NVENC and QSV, but
+  the AMF encoder wants frames in system memory, and keeping them on the device produces
+  "Impossible to convert between the formats" at the first frame instead of a faster pipeline.
+- **The fallback is per *profile*, not per encoder.** A hardware decoder that will not take a stream
+  is as good a reason to try the next engine, and in practice the two arrive together — a profile
+  refusing an odd resolution complains about its decoder several lines before its encoder gets a
+  turn. The health entry deliberately reports the encoder line rather than the first one.
+- **`MediaMtxPublishingPipeline` owns its process** rather than using MediaMTX's `runOnDemand`,
+  which would have been less code. A transcoder MediaMTX owns writes its failures into MediaMTX's
+  log, where an encoder that will not open cannot be told from a camera that is offline — and the
+  fallback exists precisely to tell those apart.
 
 ---
 

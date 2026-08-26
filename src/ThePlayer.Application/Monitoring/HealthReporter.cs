@@ -12,6 +12,7 @@ namespace ThePlayer.Application.Monitoring;
 public sealed class HealthReporter(
     IMediaServerSupervisor mediaServer,
     IHardwareInspector hardwareInspector,
+    EncoderFallbackLog encoderFallbacks,
     string environmentName)
 {
     public async Task<SystemHealth> GetAsync(CancellationToken cancellationToken = default)
@@ -19,6 +20,13 @@ public sealed class HealthReporter(
         // Hardware inspection is cached by the implementation, so this is cheap to call per request.
         var hardware = await hardwareInspector.InspectAsync(cancellationToken);
 
-        return new SystemHealth(mediaServer.Status, hardware, environmentName);
+        // Reported beside the profile list on purpose. The list says what was detected at startup;
+        // this says what has since refused to run, and reading either one without the other gives
+        // a picture of the machine that is out of date in a way nothing else here would reveal.
+        return new SystemHealth(
+            mediaServer.Status,
+            hardware,
+            environmentName,
+            encoderFallbacks.Recent);
     }
 }

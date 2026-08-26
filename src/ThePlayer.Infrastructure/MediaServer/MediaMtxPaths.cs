@@ -65,6 +65,39 @@ public sealed class MediaMtxPaths(
         logger.LogDebug("Published {Address} on MediaMTX path '{Path}'.", address, path);
     }
 
+    public async Task<Uri> ReservePublishPathAsync(
+        string path,
+        CancellationToken cancellationToken = default)
+    {
+        using var client = httpClientFactory.CreateClient(nameof(MediaMtxPaths));
+
+        // Same idempotence as PublishAsync, and for a second reason here: a path left over from a
+        // previous run may still be configured to pull a source, which would make it refuse the
+        // publisher we are about to point at it.
+        await RemoveAsync(path, cancellationToken);
+
+        // An empty configuration is a path with no source of its own. MediaMTX defaults it to
+        // "publisher", meaning it waits for someone to push - which is exactly what the transcoder
+        // is about to do.
+        using var response = await client.PostAsJsonAsync(
+            $"{_options.ApiBaseUrl}/v3/config/paths/add/{path}",
+            new { },
+            cancellationToken);
+
+        if (!response.IsSuccessStatusCode)
+        {
+            var body = await response.Content.ReadAsStringAsync(cancellationToken);
+
+            throw new MediaServerException(
+                $"MediaMTX refused to reserve '{path}' for publishing: {response.StatusCode}. {body}");
+        }
+
+        var target = new Uri($"{_options.RtspBaseUrl}/{path}");
+        logger.LogDebug("Reserved MediaMTX path '{Path}' for publishing at {Target}.", path, target);
+
+        return target;
+    }
+
     public async Task RemoveAsync(string path, CancellationToken cancellationToken = default)
     {
         try

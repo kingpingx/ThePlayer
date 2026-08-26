@@ -84,8 +84,9 @@ curl https://<your-app>.fly.dev/api/health
 ```
 
 `healthy: true` means MediaMTX is running and FFmpeg was found. Hardware acceleration will report
-software-only — there is no GPU on a Fly shared VM, which matters from Phase 3 when conversion
-starts costing something.
+software-only — there is no GPU on a Fly shared VM — and since Phase 3 that is no longer academic:
+anything the browser cannot decode is converted on the CPU, and `encoderFallbacks` in the same
+response is where a machine that has quietly dropped to libx264 says so.
 
 ---
 
@@ -125,5 +126,6 @@ Honest gaps, all of them Phase 6:
   but a Windows Job Object and `PR_SET_PDEATHSIG` are still the real fix.
 - **DNS rebinding.** Address filtering resolves a name, and FFmpeg resolves it again. See
   [SECURITY.md](SECURITY.md).
-- **No GPU.** Fine while every mode is passthrough. From Phase 3, conversion on a shared VM is
-  libx264 on a couple of cores, and it will show.
+- **No GPU.** Fine for a browser that can decode the source, which still costs the server nothing.
+  For one that cannot, conversion on a shared VM is libx264 on a couple of cores, and it will show —
+  one 1080p transcode is about all such a machine has in it.

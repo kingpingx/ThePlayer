@@ -179,3 +179,26 @@ the instance private.
 Server resource metrics are information disclosure — they describe the host's hardware and load —
 so `/api/metrics/stream` follows the same split as everything else rather than being open by
 default.
+
+---
+
+## What conversion costs, and who can spend it
+
+Before Phase 3 an unauthenticated `POST /api/watch` could open a camera connection and copy bytes.
+It can now start a **transcode**, which is a materially larger thing to hand a stranger: an encode
+session on the host's GPU, or several cores of libx264 if there is no GPU to take it.
+
+Nothing currently caps how many run at once. The runtime fallback makes a machine at its session
+limit keep *working* — it drops to the next engine and eventually to software — but that is a
+correctness mechanism, not a limit: it degrades gracefully all the way down to a host doing twenty
+software transcodes and serving none of them well.
+
+Two things follow, and both belong with authentication in Phase 6:
+
+- **Auth first.** A concurrency cap on an open endpoint only decides how quickly an anonymous
+  caller exhausts the host, not whether they can.
+- **Then a cap**, per host rather than per viewer — viewers already share a pipeline when they want
+  the same bytes, so the number worth bounding is distinct plans, not requests.
+
+Until then this is another reason the honest posture for a public deployment is `AddressPolicy` on
+and the instance private.

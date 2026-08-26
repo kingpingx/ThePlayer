@@ -48,10 +48,19 @@ public sealed record MediaServerStatus(
 /// <param name="MediaServer">State of the MediaMTX child process.</param>
 /// <param name="Hardware">FFmpeg version and the acceleration profiles detected on this machine.</param>
 /// <param name="Environment">Which named configuration is active: Development, Staging or Production.</param>
+/// <param name="EncoderFallbacks">
+/// Times a broadcast could not use the encoder it asked for, most recent first.
+/// <para>
+/// Detection at startup proves an encoder exists; it does not prove a session can be opened later.
+/// Without this a machine that has quietly dropped to libx264 looks identical to one that is simply
+/// slow, and the profile list above goes on claiming an engine nothing can actually use.
+/// </para>
+/// </param>
 public sealed record SystemHealth(
     MediaServerStatus MediaServer,
     HardwareCapabilities Hardware,
-    string Environment)
+    string Environment,
+    IReadOnlyList<EncoderFallbackRecord> EncoderFallbacks)
 {
     /// <summary>
     /// Healthy means the pieces needed to actually play something are present: the edge server is
@@ -60,3 +69,19 @@ public sealed record SystemHealth(
     /// </summary>
     public bool IsHealthy => MediaServer.IsUsable && Hardware.Profiles.Count > 0;
 }
+
+/// <summary>One time an encoder that was detected at startup would not open when it was needed.</summary>
+/// <param name="FailedProfile">The engine that was tried, by display name.</param>
+/// <param name="FailedEncoder">The FFmpeg encoder that refused.</param>
+/// <param name="ReplacementProfile">
+/// What ran instead, or <c>null</c> when there was nothing further down the ranking and the
+/// broadcast failed outright.
+/// </param>
+/// <param name="Reason">What FFmpeg said, already scrubbed of credentials.</param>
+/// <param name="At">When it happened.</param>
+public sealed record EncoderFallbackRecord(
+    string FailedProfile,
+    string FailedEncoder,
+    string? ReplacementProfile,
+    string Reason,
+    DateTimeOffset At);

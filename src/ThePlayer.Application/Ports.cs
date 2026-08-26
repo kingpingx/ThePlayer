@@ -67,6 +67,17 @@ public interface IMediaServer
     /// </remarks>
     Task PublishAsync(string path, MediaAddress address, CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// Declares a path with no source of its own and returns where to publish into it.
+    /// </summary>
+    /// <remarks>
+    /// The other half of <see cref="PublishAsync"/>, for the streams the edge server cannot fetch
+    /// for itself. A camera it can pull; a camera whose codec has to be converted first it cannot,
+    /// so this process runs the transcoder and pushes the result in. Also idempotent.
+    /// </remarks>
+    /// <returns>The RTSP URL a publisher should push to.</returns>
+    Task<Uri> ReservePublishPathAsync(string path, CancellationToken cancellationToken = default);
+
     /// <summary>Removes a published path. Safe to call for a path that is already gone.</summary>
     Task RemoveAsync(string path, CancellationToken cancellationToken = default);
 
@@ -128,6 +139,59 @@ public interface IFrameStream : IAsyncDisposable
     /// </summary>
     /// <remarks>Enumerable once. The broadcaster is the only caller, and it fans out to viewers.</remarks>
     IAsyncEnumerable<EncodedFrame> FramesAsync(CancellationToken cancellationToken = default);
+}
+
+/// <summary>
+/// Converts a stream and pushes the result into the edge server, for the WebRTC modes that cannot
+/// simply pass bytes through.
+/// </summary>
+/// <remarks>
+/// A separate port from <see cref="IFramePipeline"/> even though both run FFmpeg, because what
+/// they promise differs. That one yields frames into this process and describes the stream well
+/// enough to configure a decoder; this one hands the video to something else entirely and promises
+/// only that video is flowing. Sharing an interface would mean one of the two returning members
+/// its callers must know not to use.
+/// </remarks>
+public interface IPublishingPipeline
+{
+    /// <summary>
+    /// Starts converting, and returns once video is actually reaching
+    /// <paramref name="target"/> - not merely once the process has been launched.
+    /// </summary>
+    /// <remarks>
+    /// The distinction matters: a viewer told to connect to a path that no publisher ever reached
+    /// sees an indefinite black screen with no error anywhere. Waiting for the first frame turns
+    /// that into a failure that can be reported.
+    /// </remarks>
+    /// <exception cref="MediaInspectionException">
+    /// The source could not be read, or no engine on this machine could encode it. Always safe to
+    /// show a user.
+    /// </exception>
+    Task<IPublishedStream> StartAsync(
+        MediaAddress address,
+        BroadcastPlan plan,
+        VideoFormat format,
+        Uri target,
+        CancellationToken cancellationToken = default);
+}
+
+/// <summary>A conversion currently feeding the edge server.</summary>
+public interface IPublishedStream : IAsyncDisposable
+{
+    /// <summary>
+    /// The engine that is actually doing the work, which is not necessarily the one the plan
+    /// asked for - see <c>EncoderFallbackLog</c>.
+    /// </summary>
+    AccelerationProfile Acceleration { get; }
+
+    /// <summary>
+    /// Whether the transcoder has stopped: the file reached its end, or the process died.
+    /// </summary>
+    /// <remarks>
+    /// Read by the sweep. Without it a dead transcoder leaves a broadcast registered and playable
+    /// on paper, and every later viewer joins a path with nothing publishing to it.
+    /// </remarks>
+    bool HasEnded { get; }
 }
 
 /// <summary>

@@ -1,9 +1,12 @@
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
+using System.Text;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using ThePlayer.Application;
+using ThePlayer.Application.Monitoring;
 using ThePlayer.Domain.Broadcasting;
+using ThePlayer.Domain.Hardware;
 using ThePlayer.Domain.Media;
 
 namespace ThePlayer.Infrastructure.FFmpeg;
@@ -22,9 +25,15 @@ namespace ThePlayer.Infrastructure.FFmpeg;
 /// supplying different arguments and a second <see cref="IFrameReader"/> rather than by editing
 /// anything here.
 /// </para>
+/// <para>
+/// Since Phase 3 it also converts. A plan that needs an encoder is attempted on the engine the
+/// planner chose and then, if that engine will not open, on each one below it in the ranking.
+/// </para>
 /// </remarks>
 public sealed class FFmpegStreamingPipeline(
     IOptions<FFmpegOptions> options,
+    IHardwareInspector hardwareInspector,
+    EncoderFallbackLog fallbackLog,
     ILogger<FFmpegStreamingPipeline> logger) : IFramePipeline
 {
     private readonly FFmpegOptions _options = options.Value;
@@ -35,15 +44,69 @@ public sealed class FFmpegStreamingPipeline(
         VideoFormat format,
         CancellationToken cancellationToken = default)
     {
-        if (plan.RequiresConversion)
+        if (!plan.RequiresConversion)
         {
-            // Phase 3 supplies the encoder arguments. Until then the coordinator rejects such a
-            // plan long before it reaches here, so this is a guard rather than a user-facing path.
-            throw new NotSupportedException(
-                "This pipeline copies bytes; conversion arrives in Phase 3.");
+            return await StartOnceAsync(address, plan, format, profile: null, cancellationToken);
         }
 
-        var arguments = BuildArguments(address, format);
+        var hardware = await hardwareInspector.InspectAsync(cancellationToken);
+        var candidates = EncoderSelection.Candidates(plan, hardware);
+
+        for (var attempt = 0; attempt < candidates.Count; attempt++)
+        {
+            var profile = candidates[attempt];
+            var next = attempt + 1 < candidates.Count ? candidates[attempt + 1] : null;
+
+            try
+            {
+                return await StartOnceAsync(address, plan, format, profile, cancellationToken);
+            }
+            catch (EncoderRefusedException refused) when (next is not null)
+            {
+                fallbackLog.Record(profile, next, refused.Diagnostics);
+
+                logger.LogWarning(
+                    "{Encoder} would not open for {Address}; falling back to {Next}. {Reason}",
+                    profile.H264Encoder,
+                    address,
+                    next.DisplayName,
+                    refused.Diagnostics);
+            }
+            catch (EncoderRefusedException refused)
+            {
+                // Nothing left below this one. Recorded anyway: "the last engine on the machine
+                // failed too" is the most useful thing the health endpoint could carry.
+                fallbackLog.Record(profile, replacement: null, refused.Diagnostics);
+                throw refused.AsInspectionFailure(address);
+            }
+        }
+
+        // Only reachable if detection reported no profiles at all, which it is written never to do.
+        throw new MediaInspectionException(
+            $"{address.Display} has to be converted, and this machine reported no encoder to do it with.");
+    }
+
+    /// <summary>One attempt, on one engine.</summary>
+    /// <exception cref="EncoderRefusedException">
+    /// The stream failed to start in a way that points at the encoder, so trying the next engine
+    /// down is worth doing. Anything else - an unreachable camera, a malformed parameter set - is
+    /// left as the <see cref="MediaInspectionException"/> it already is, because it would fail
+    /// identically on every engine and retrying would only multiply the wait.
+    /// </exception>
+    private async Task<IFrameStream> StartOnceAsync(
+        MediaAddress address,
+        BroadcastPlan plan,
+        VideoFormat format,
+        AccelerationProfile? profile,
+        CancellationToken cancellationToken)
+    {
+        var arguments = FFmpegArgumentBuilder.ForFrameStream(
+            address,
+            format,
+            plan,
+            profile,
+            _options.RtspConnectTimeout);
+
         logger.LogDebug("Starting frame pipeline: ffmpeg {Arguments}", address.Scrub(arguments));
 
         var process = new Process
@@ -71,12 +134,26 @@ public sealed class FFmpegStreamingPipeline(
                 ex);
         }
 
-        var stream = new FFmpegFrameStream(process, format, address, logger);
+        // Asked of the builder rather than worked out again here, so the reader at this end of the
+        // pipe cannot disagree with the muxer at the other.
+        var stream = new FFmpegFrameStream(
+            process,
+            format,
+            FFmpegArgumentBuilder.DeliveredCodec(plan),
+            address,
+            logger);
 
         try
         {
             await stream.InitialiseAsync(_options.PipelineStartTimeout, cancellationToken);
             return stream;
+        }
+        catch (MediaInspectionException) when (
+            profile is not null && EncoderSelection.LooksLikeEncoderFailure(stream.Diagnostics, profile))
+        {
+            var diagnostics = stream.Diagnostics;
+            await stream.DisposeAsync();
+            throw new EncoderRefusedException(profile, diagnostics);
         }
         catch
         {
@@ -84,42 +161,32 @@ public sealed class FFmpegStreamingPipeline(
             throw;
         }
     }
+}
+
+/// <summary>
+/// An engine that is installed and was verified at startup but would not open a session now.
+/// </summary>
+/// <remarks>
+/// Internal, and never reaches a caller: it exists only to carry "try the next profile" from the
+/// attempt that failed up to the loop that can act on it, which is a different thing from the
+/// user-facing <see cref="MediaInspectionException"/> it becomes if the ranking runs out.
+/// </remarks>
+internal sealed class EncoderRefusedException(AccelerationProfile profile, string diagnostics)
+    : Exception($"{profile.H264Encoder} could not be opened. {diagnostics}")
+{
+    public AccelerationProfile Profile { get; } = profile;
+
+    /// <summary>What FFmpeg printed, already scrubbed of credentials.</summary>
+    public string Diagnostics { get; } = diagnostics;
 
     /// <summary>
-    /// Builds the copy-through command line.
+    /// The version of this a user should see, once there is no engine left to try.
     /// </summary>
-    /// <remarks>
-    /// <para>
-    /// <c>aud=insert</c> gives the reader a frame boundary to split on without parsing slice
-    /// headers. <c>dump_extra=freq=keyframe</c> is <b>not</b> optional: copying from an MP4 leaves
-    /// the parameter sets in the container's <c>avcC</c> box, so without it the elementary stream
-    /// contains IDR frames and no SPS at all, and WebCodecs cannot configure a decoder. It also
-    /// makes late joiners work, since a client attaching mid-stream gets parameter sets at the next
-    /// keyframe with no special handling.
-    /// </para>
-    /// <para>
-    /// <c>-an</c> because this project is video only, and an audio stream on stdout would corrupt
-    /// the elementary stream the reader is parsing.
-    /// </para>
-    /// </remarks>
-    private string BuildArguments(MediaAddress address, VideoFormat format)
-    {
-        var input = address.Kind == MediaAddressKind.Rtsp
-            // TCP for the same reason ffprobe uses it: a camera on wifi drops UDP packets, and a
-            // stream with holes in it produces frames that will not decode.
-            ? $"-rtsp_transport tcp -timeout {(long)_options.RtspConnectTimeout.TotalMilliseconds * 1000}"
-
-            // -re paces a file at real time. Without it FFmpeg reads as fast as the disk allows and
-            // a viewer receives the whole file in a few seconds.
-            : "-re";
-
-        var filter = format.Codec == VideoCodec.H265 ? "hevc_metadata" : "h264_metadata";
-        var container = format.Codec == VideoCodec.H265 ? "hevc" : "h264";
-
-        return $"-hide_banner -loglevel error {input} -i \"{address.ToFFmpegInput()}\" " +
-               $"-an -c:v copy -bsf:v {filter}=aud=insert,dump_extra=freq=keyframe " +
-               $"-f {container} -";
-    }
+    public MediaInspectionException AsInspectionFailure(MediaAddress address) =>
+        new(
+            $"{address.Display} has to be converted, and no encoder on this machine would " +
+            $"accept it. The last one tried was {Profile.H264Encoder}: {Diagnostics}",
+            this);
 }
 
 /// <summary>
@@ -133,27 +200,55 @@ public sealed class FFmpegStreamingPipeline(
 /// </remarks>
 internal sealed class FFmpegFrameStream : IFrameStream
 {
+    /// <summary>
+    /// How much of stderr to keep for diagnosis.
+    /// </summary>
+    /// <remarks>
+    /// Enough for the several lines FFmpeg emits when an encoder will not open, and bounded because
+    /// a stream that logs a warning per frame would otherwise grow this for the life of a broadcast.
+    /// </remarks>
+    private const int MaxDiagnosticBytes = 4096;
+
     private readonly Process _process;
     private readonly VideoFormat _format;
+
+    /// <summary>
+    /// What is coming out of FFmpeg, which is not always what went in.
+    /// </summary>
+    /// <remarks>
+    /// The distinction only appears once conversion exists, and getting it wrong fails in a way
+    /// that points nowhere useful: an H.264 stream read as HEVC yields no parameter sets, so the
+    /// pipeline reports that the source "ended before it produced a decodable frame" while FFmpeg
+    /// sits there having converted it perfectly well.
+    /// </remarks>
+    private readonly VideoCodec _deliveredCodec;
+
     private readonly MediaAddress _address;
     private readonly ILogger _logger;
     private readonly IAsyncEnumerator<ReadFrame> _frames;
     private readonly CancellationTokenSource _lifetime = new();
     private readonly List<EncodedFrame> _buffered = [];
     private readonly Task _stderrPump;
+    private readonly StringBuilder _diagnostics = new();
 
     private StreamInitialisation? _initialisation;
     private long _frameIndex;
     private bool _exhausted;
 
-    public FFmpegFrameStream(Process process, VideoFormat format, MediaAddress address, ILogger logger)
+    public FFmpegFrameStream(
+        Process process,
+        VideoFormat format,
+        VideoCodec deliveredCodec,
+        MediaAddress address,
+        ILogger logger)
     {
         _process = process;
         _format = format;
+        _deliveredCodec = deliveredCodec;
         _address = address;
         _logger = logger;
 
-        var reader = new CompressedFrameReader(format.Codec);
+        var reader = new CompressedFrameReader(deliveredCodec);
         _frames = reader
             .ReadAsync(process.StandardOutput.BaseStream, _lifetime.Token)
             .GetAsyncEnumerator(_lifetime.Token);
@@ -166,6 +261,25 @@ internal sealed class FFmpegFrameStream : IFrameStream
 
     public StreamInitialisation Initialisation =>
         _initialisation ?? throw new InvalidOperationException("The pipeline has not been started.");
+
+    /// <summary>
+    /// What FFmpeg complained about, scrubbed and capped.
+    /// </summary>
+    /// <remarks>
+    /// The pipeline reads this to decide whether a failed start is worth retrying on another
+    /// engine. A stream that fails because the camera is unreachable says so here, and says the
+    /// same thing on every engine - which is exactly the case a fallback must not walk.
+    /// </remarks>
+    public string Diagnostics
+    {
+        get
+        {
+            lock (_diagnostics)
+            {
+                return _diagnostics.ToString();
+            }
+        }
+    }
 
     /// <summary>
     /// Reads until the stream describes itself, buffering whatever arrives in the meantime.
@@ -192,8 +306,11 @@ internal sealed class FFmpegFrameStream : IFrameStream
                     continue;
                 }
 
+                // Dimensions and frame rate still come from the source: conversion changes the
+                // codec, never the picture. The codec string, though, describes what the client
+                // will actually be handed.
                 _initialisation = new StreamInitialisation(
-                    CodecStringBuilder.Build(_format.Codec, sps),
+                    CodecStringBuilder.Build(_deliveredCodec, sps),
                     _format.Width,
                     _format.Height,
                     _format.FrameRate);
@@ -209,6 +326,12 @@ internal sealed class FFmpegFrameStream : IFrameStream
             }
 
             _exhausted = true;
+
+            // An encoder that refused to open ends the stream here, before a single frame, with
+            // the reason sitting in stderr. Waiting for the pump to catch up means the caller sees
+            // that reason rather than an empty string and gives up on a fallback it could have made.
+            await SettleStandardErrorAsync();
+
             throw new MediaInspectionException(
                 $"{_address.Display} ended before it produced a decodable frame.");
         }
@@ -278,21 +401,57 @@ internal sealed class FFmpegFrameStream : IFrameStream
         return new EncodedFrame(frame.Payload, frame.IsKeyframe, timestamp);
     }
 
+    /// <summary>
+    /// Gives the stderr pump a moment to finish once stdout has closed.
+    /// </summary>
+    /// <remarks>
+    /// Bounded rather than awaited outright: on a healthy stream the pump runs for the life of the
+    /// broadcast, so waiting for it to complete would be waiting forever.
+    /// </remarks>
+    private async Task SettleStandardErrorAsync()
+    {
+        try
+        {
+            await _stderrPump.WaitAsync(TimeSpan.FromMilliseconds(500), CancellationToken.None);
+        }
+        catch (Exception)
+        {
+            // Timed out, or the pump ended badly. Whatever it managed to collect is still there.
+        }
+    }
+
     private async Task PumpStandardErrorAsync()
     {
         try
         {
             while (await _process.StandardError.ReadLineAsync(_lifetime.Token) is { } line)
             {
-                if (line.Length > 0)
+                if (line.Length == 0)
                 {
-                    _logger.LogWarning("[ffmpeg] {Line}", _address.Scrub(line));
+                    continue;
                 }
+
+                var scrubbed = _address.Scrub(line);
+                Remember(scrubbed);
+                _logger.LogWarning("[ffmpeg] {Line}", scrubbed);
             }
         }
         catch (Exception)
         {
             // The pipe closes when the process exits. Nothing useful to report.
+        }
+    }
+
+    private void Remember(string line)
+    {
+        lock (_diagnostics)
+        {
+            if (_diagnostics.Length >= MaxDiagnosticBytes)
+            {
+                return;
+            }
+
+            _diagnostics.AppendLine(line);
         }
     }
 

@@ -9,8 +9,63 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## Unreleased
 
-Deployment, pulled forward from Phase 6 so that Phase 2 can be shown to someone who is not sitting
-at your keyboard. Authentication is still Phase 6 and is still missing.
+### Phase 3: Video conversion
+
+H.265 now plays **everywhere** — converted for clients that need it, passed through untouched for
+clients that do not. The planner has decided when to convert since Phase 1; this is the release
+where the answer is carried out instead of rejected. `POST /api/watch` no longer returns `501` for
+anything but `ServerDecoded`.
+
+The interesting part is what did *not* change: a browser that can decode H.265 still gets the
+original bytes and the server still does no codec work. Both streams can run from one camera at the
+same time, on separate pipelines, and `/api/broadcasts` shows them side by side.
+
+#### Added
+
+- **`FFmpegArgumentBuilder`** — one place that turns a plan and an acceleration profile into a
+  command line, for both destinations. Conversion feeds two of them: an elementary stream on stdout
+  for the frame socket, and RTSP into MediaMTX for WebRTC. Same input handling and the same encoder
+  settings either way, so the two paths cannot drift into producing different video.
+- **`MediaMtxPublishingPipeline`** — MediaMTX will pull a camera but it will not re-encode one, so a
+  converted stream is transcoded here and pushed back in. It is our child process rather than
+  MediaMTX's `runOnDemand` deliberately: a transcoder MediaMTX owns writes its failures into
+  MediaMTX's log, where an encoder that will not open is indistinguishable from a camera that is
+  offline, and the fallback below needs to tell those apart.
+- **Runtime encoder fallback.** Startup detection proves an encoder *exists*; it does not prove a
+  session can be opened now. NVENC allows three to eight concurrent sessions on a consumer card, so
+  the fourth broadcast fails at `avcodec_open2` long after the health check has finished saying
+  NVENC is available. A refused engine drops to the next one down the ranking, and the last resort
+  is libx264, which is present in every practical FFmpeg build.
+- **`encoderFallbacks` in `GET /api/health`** — because a machine that has quietly dropped to
+  libx264 is otherwise indistinguishable from one that is merely slow, and the profile list goes on
+  advertising an engine nothing can actually open. Empty on a healthy host.
+- Acceleration profiles carry their own encoder arguments, so `-hwaccel_output_format` and the
+  vendor presets live beside the encoder name rather than in a switch inside each pipeline. That
+  flag is the one that matters: without it every decoded frame is copied out of GPU memory and back
+  in, which costs more than the encode.
+
+#### Changed
+
+- The keyframe interval is derived from the source frame rate — about two seconds — rather than
+  fixed. A fixed `-g 30` means one second of join latency on a 30fps feed and three on a 10fps one.
+- B-frames are disabled on every engine. They reorder output and add at least one frame of latency
+  for nothing on a feed rendered on arrival.
+- `BroadcastCoordinator` shuts down transcoders with their broadcasts, and treats one that has died
+  the way it already treated a file that ran out: the broadcast ends rather than being handed to
+  the next viewer, who would otherwise get a WHEP URL for a path nobody is publishing to.
+
+#### Fixed
+
+- The frame reader was built from the *source* codec rather than the delivered one. Harmless while
+  the server only ever copied bytes, and wrong the moment it converted: an H.264 stream parsed as
+  HEVC yields no parameter sets, so a converted stream failed with "ended before it produced a
+  decodable frame" while FFmpeg sat there having converted it perfectly well. Both ends of the pipe
+  now ask `FFmpegArgumentBuilder.DeliveredCodec` rather than working it out separately.
+
+### Deployment
+
+Pulled forward from Phase 6 so that Phase 2 can be shown to someone who is not sitting at your
+keyboard. Authentication is still Phase 6 and is still missing.
 
 ### Added
 

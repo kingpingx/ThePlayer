@@ -26,7 +26,12 @@
   <div class="columns">
     <section class="stage">
       @if (watch(); as current) {
-        @if (isClientDecoded()) {
+        @if (isServerDecoded()) {
+          <app-server-decoded-player
+            [socketPath]="current.transport.url"
+            (failed)="onPlayerFailed($event)"
+            (ended)="onEnded()" />
+        } @else if (isClientDecoded()) {
           <app-client-decoded-player
             [socketPath]="current.transport.url"
             (failed)="onPlayerFailed($event)"
@@ -50,12 +55,21 @@
           </span>
         </div>
 
-        @if (isClientDecoded()) {
+        @if (isSocketMode()) {
+          <!-- The client half of the comparison. The server half is the monitor beside it, and the
+               point of showing them together is that cycling the modes inverts the two. -->
           <div class="facts">
             <span class="fact">fps <b>{{ stats().fps }}</b></span>
-            <span class="fact">decode <b>{{ stats().decodeMs }} ms</b></span>
+            <span class="fact">
+              {{ isServerDecoded() ? 'unpack' : 'decode' }}
+              <b>{{ stats().decodeMs }} ms</b>
+            </span>
             <span class="fact">queue <b>{{ stats().queueDepth }}</b></span>
             <span class="fact">dropped <b>{{ stats().dropped }}</b></span>
+            <span class="fact" [class.good]="isServerDecoded()">
+              this browser
+              <b>{{ isServerDecoded() ? 'decodes no video' : 'decodes every frame' }}</b>
+            </span>
           </div>
         }
       } @else {

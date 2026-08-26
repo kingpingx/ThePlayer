@@ -13,18 +13,40 @@ namespace ThePlayer.Infrastructure.FFmpeg;
 public readonly record struct ReadFrame(byte[] Payload, bool IsKeyframe, byte[]? SequenceParameterSet);
 
 /// <summary>
-/// Splits a raw byte stream into whole pictures.
+/// Splits a raw byte stream into whole pictures, and knows when it has seen enough of them to say
+/// what the stream is.
 /// </summary>
 /// <remarks>
-/// An interface because Phase 5 adds a second implementation that splits MJPEG on SOI/EOI markers.
-/// Two implementations with a real substitution point is the bar this codebase sets for an
-/// abstraction; the pipeline that drives it is parameterised by the reader and the FFmpeg
-/// arguments, so a third mode is new arguments plus a new reader and no edit to existing code.
+/// <para>
+/// Two implementations with a genuine substitution point, which is the bar this codebase sets for
+/// an abstraction: Annex-B split on delimiters, and JPEG split on its own markers.
+/// </para>
+/// <para>
+/// <see cref="Describe"/> is part of the interface rather than the pipeline because the two
+/// implementations answer it from completely different places. Annex-B has to wait for a parameter
+/// set and derive an RFC 6381 string from its bits; a JPEG stream is described by its first
+/// picture, since every picture is independent. A pipeline that decided this for itself would have
+/// to know which reader it was driving, which is exactly what the interface is for.
+/// </para>
 /// </remarks>
 public interface IFrameReader
 {
     /// <summary>Reads until the source ends. Each element is exactly one whole picture.</summary>
     IAsyncEnumerable<ReadFrame> ReadAsync(Stream source, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// How a client should be told to handle this stream, if this frame settles it.
+    /// </summary>
+    /// <returns>
+    /// The codec string, or <c>null</c> if this frame does not describe the stream and the caller
+    /// should keep reading.
+    /// </returns>
+    /// <exception cref="InvalidDataException">
+    /// The frame should have described the stream and could not - a malformed parameter set. Worth
+    /// failing on rather than guessing a codec string that <c>configure()</c> would reject for
+    /// reasons nobody could trace back to here.
+    /// </exception>
+    string? Describe(ReadFrame frame);
 }
 
 /// <summary>
@@ -69,6 +91,16 @@ public sealed class CompressedFrameReader : IFrameReader
 
         _codec = codec;
     }
+
+    /// <summary>
+    /// An Annex-B stream is described by the first parameter set it carries, and not before.
+    /// </summary>
+    /// <remarks>
+    /// <c>dump_extra=freq=keyframe</c> puts one in front of every keyframe, so on a live camera
+    /// this is answered at the first GOP boundary rather than the first byte.
+    /// </remarks>
+    public string? Describe(ReadFrame frame) =>
+        frame.SequenceParameterSet is { } sps ? CodecStringBuilder.Build(_codec, sps) : null;
 
     public async IAsyncEnumerable<ReadFrame> ReadAsync(
         Stream source,
@@ -356,4 +388,212 @@ public sealed class CompressedFrameReader : IFrameReader
         /// <summary>A coded slice that depends on earlier pictures.</summary>
         Slice,
     }
+}
+
+/// <summary>
+/// Splits an MJPEG stream into whole JPEG images.
+/// </summary>
+/// <remarks>
+/// <para>
+/// Far simpler than Annex-B, and for a reason worth stating: JPEG images are <b>self-delimiting</b>.
+/// <c>FF D8</c> opens one and <c>FF D9</c> closes it, so nothing has to be injected into the stream
+/// to find boundaries and nothing has to be parsed to classify what was found.
+/// </para>
+/// <para>
+/// There are no parameter sets and no reference chain, so every picture is independently decodable.
+/// That makes each frame a keyframe, makes a late joiner able to start anywhere, and makes dropping
+/// a frame cost exactly that frame - none of which is true of the compressed path.
+/// </para>
+/// <para>
+/// <b>A marker is only a marker outside entropy-coded data.</b> The bytes <c>FF D9</c> can appear
+/// inside a scan, so this tracks whether it is in one and skips the entropy-coded segment properly
+/// rather than scanning for the end marker from the start of the file. Getting that wrong produces
+/// truncated images that most decoders render as a grey lower half.
+/// </para>
+/// </remarks>
+public sealed class JpegPictureReader : IFrameReader
+{
+    private const int ReadChunkBytes = 64 * 1024;
+
+    /// <summary>
+    /// A single image larger than this means the stream is not MJPEG at all - most likely the end
+    /// marker is never being found, so everything is accumulating as one picture.
+    /// </summary>
+    private const int MaxPictureBytes = 32 * 1024 * 1024;
+
+    private const byte Marker = 0xFF;
+    private const byte StartOfImage = 0xD8;
+    private const byte EndOfImage = 0xD9;
+
+    /// <summary>
+    /// Every picture describes itself, so the first one settles the stream.
+    /// </summary>
+    /// <remarks>
+    /// The value is not an RFC 6381 string, and deliberately so - there is no useful one for
+    /// MJPEG. A client on this path renders images with <c>createImageBitmap</c> rather than
+    /// configuring a <c>VideoDecoder</c>, which is the whole point of the mode: it decodes no video
+    /// at all.
+    /// </remarks>
+    public string? Describe(ReadFrame frame) => "mjpeg";
+
+    public async IAsyncEnumerable<ReadFrame> ReadAsync(
+        Stream source,
+        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        var buffer = new byte[ReadChunkBytes * 2];
+        var length = 0;
+
+        // Where the current image starts, or -1 before the first SOI is seen. FFmpeg emits nothing
+        // before the first image, but a stream joined mid-flight can begin anywhere.
+        var start = -1;
+        var scanned = 0;
+        var inScan = false;
+
+        while (true)
+        {
+            if (length == buffer.Length)
+            {
+                Array.Resize(ref buffer, buffer.Length * 2);
+            }
+
+            var read = await source.ReadAsync(buffer.AsMemory(length), cancellationToken);
+            if (read == 0)
+            {
+                break;
+            }
+
+            length += read;
+
+            while (true)
+            {
+                var end = FindPicture(buffer, ref scanned, length, ref start, ref inScan);
+                if (end < 0)
+                {
+                    break;
+                }
+
+                yield return new ReadFrame(buffer[start..end], IsKeyframe: true, SequenceParameterSet: null);
+                start = -1;
+            }
+
+            if (start >= 0 && length - start > MaxPictureBytes)
+            {
+                throw new InvalidDataException(
+                    $"A single picture exceeded {MaxPictureBytes / (1024 * 1024)} MB. " +
+                    "The stream is most likely not MJPEG.");
+            }
+
+            Compact(buffer, ref length, ref scanned, ref start);
+        }
+    }
+
+    /// <summary>
+    /// Advances the scan to the end of the next complete image.
+    /// </summary>
+    /// <returns>The offset just past its end marker, or <c>-1</c> if there is not one yet.</returns>
+    private static int FindPicture(byte[] buffer, ref int scanned, int length, ref int start, ref bool inScan)
+    {
+        var i = Math.Max(scanned, 0);
+
+        while (i + 1 < length)
+        {
+            if (buffer[i] != Marker)
+            {
+                i++;
+                continue;
+            }
+
+            var kind = buffer[i + 1];
+
+            // Fill bytes: a run of FFs is padding, and only the last one belongs to the marker.
+            if (kind == Marker)
+            {
+                i++;
+                continue;
+            }
+
+            if (kind == StartOfImage)
+            {
+                if (start < 0)
+                {
+                    start = i;
+                }
+
+                inScan = false;
+                i += 2;
+                continue;
+            }
+
+            if (kind == EndOfImage && start >= 0)
+            {
+                scanned = i + 2;
+                inScan = false;
+                return i + 2;
+            }
+
+            // Start of scan: everything after its header is entropy-coded, where FF is escaped as
+            // FF 00 and any other FF xx is a real marker (restart markers, and the final EOI).
+            if (kind == 0xDA)
+            {
+                inScan = true;
+                i += 2;
+                continue;
+            }
+
+            // Inside a scan, FF 00 is an escaped literal and restart markers are structural. Both
+            // are stepped over rather than treated as segment headers.
+            if (inScan)
+            {
+                i += 2;
+                continue;
+            }
+
+            i += 2;
+        }
+
+        // Leave the trailing byte unscanned: a marker can straddle a read boundary.
+        scanned = Math.Max(0, length - 1);
+        return -1;
+    }
+
+    /// <summary>Drops everything before the picture in hand, so the buffer does not grow forever.</summary>
+    private static void Compact(byte[] buffer, ref int length, ref int scanned, ref int start)
+    {
+        var keepFrom = start >= 0 ? start : Math.Max(0, length - 1);
+
+        if (keepFrom <= 0)
+        {
+            return;
+        }
+
+        Array.Copy(buffer, keepFrom, buffer, 0, length - keepFrom);
+        length -= keepFrom;
+        scanned = Math.Max(0, scanned - keepFrom);
+
+        if (start >= 0)
+        {
+            start = 0;
+        }
+    }
+}
+
+/// <summary>Chooses the reader for a delivered codec.</summary>
+/// <remarks>
+/// The counterpart to <see cref="FFmpegArgumentBuilder.DeliveredCodec"/>, and asked the same
+/// question by the same caller: one decides what comes out of FFmpeg, this decides what reads it.
+/// Keeping the pair together is what stops the muxer at one end of the pipe disagreeing with the
+/// reader at the other, which has happened once already.
+/// </remarks>
+public static class FrameReaders
+{
+    public static IFrameReader For(VideoCodec codec) => codec switch
+    {
+        VideoCodec.H264 or VideoCodec.H265 => new CompressedFrameReader(codec),
+        VideoCodec.Mjpeg => new JpegPictureReader(),
+
+        _ => throw new ArgumentOutOfRangeException(
+            nameof(codec),
+            codec,
+            "No frame reader delivers this codec."),
+    };
 }

@@ -5,6 +5,7 @@ import { ClientDecodedPlayerComponent } from './features/video-player/client-dec
 import { DecodeModeToggleComponent } from './features/video-player/decode-mode-toggle.component';
 import { ResourceMonitorComponent } from './features/resource-monitor/resource-monitor.component';
 import { ServerAssistedPlayerComponent } from './features/video-player/server-assisted-player.component';
+import { ServerDecodedPlayerComponent } from './features/video-player/server-decoded-player.component';
 import { PlaybackStatsService } from './core/playback-stats.service';
 import { ServerMetricsService } from './core/server-metrics.service';
 import { PlaybackMode, WatchResponse } from './core/models';
@@ -23,6 +24,7 @@ import { WatchError, WatchService } from './core/watch.service';
     DecodeModeToggleComponent,
     ResourceMonitorComponent,
     ServerAssistedPlayerComponent,
+    ServerDecodedPlayerComponent,
   ],
   templateUrl: './app.html',
   styleUrl: './app.css',
@@ -41,7 +43,21 @@ export class App {
 
   protected readonly stats = this.statsService.stats;
 
-  protected readonly isClientDecoded = computed(() => this.watch()?.transport.kind === 'WebSocket');
+  /** Both socket modes, which is what the transport says. Which of the two is the mode's business. */
+  protected readonly isSocketMode = computed(() => this.watch()?.transport.kind === 'WebSocket');
+
+  /**
+   * The mode where the browser decodes no video at all.
+   *
+   * Distinguished by mode rather than by the codec string in the init message, because the shell
+   * has to choose a component before the socket has said anything.
+   */
+  protected readonly isServerDecoded = computed(() => this.watch()?.mode === 'ServerDecoded');
+
+  /** The client half of the comparison only means something where the client is decoding. */
+  protected readonly isClientDecoded = computed(
+    () => this.isSocketMode() && !this.isServerDecoded(),
+  );
 
   /** The one fact worth putting in front of someone: is the server doing codec work right now? */
   protected readonly converted = computed(() => this.watch()?.converted ?? false);

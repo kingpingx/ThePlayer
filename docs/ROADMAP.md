@@ -419,7 +419,7 @@ every process on the machine appearing to have no children at all.
 
 ---
 
-# Phase 5 — Full server decoding and the three-way comparison · `v0.6.0`
+# Phase 5 — Full server decoding and the three-way comparison · `v0.6.0` · **done**
 
 **Goal:** the third mode — the only one where the client decodes no video at all — and the diagnostics
 overlay that makes all three comparable.
@@ -468,9 +468,47 @@ near zero on `ClientDecoded`, client decode time doing the opposite and reaching
 
 ## Verification
 
-- All three modes on one address show the fully inverted cost profile.
-- Three or more tabs share one pipeline; a throttled tab drops frames without affecting the others.
-- A file reaching its last frame moves the broadcast to `Ended` and the player says so.
+**Done**, against a real H.265 file rather than by inspection.
+
+- **All three modes, one address, one reading of the metrics feed.** The cost profile inverts
+  exactly as predicted — the mode where the client decodes nothing is the one the server pays most
+  for:
+
+  ```
+  cpu 15.9%  gpu 2%  enc 3%  dec 3%
+    | ClientDecoded copying:     0.1% cpu     <- server does no codec work
+    | ClientDecoded converting:  0.5% cpu     <- hardware transcode
+    | ServerDecoded converting:  2.4% cpu     <- decode plus a CPU JPEG encode
+  ```
+
+- **The frame socket really carries decodable pictures.** Fifty read straight off the wire: every
+  one opened `FF D8` and closed `FF D9`, none malformed, timestamps 40ms apart at 25fps.
+- **The bandwidth claim is now measured rather than estimated.** The same 720p clip, same socket:
+
+  | Mode | Mean payload | At 25fps |
+  |---|---|---|
+  | `ClientDecoded`, H.265 passed through | 7.5 KB | **1.5 Mbps** |
+  | `ServerDecoded`, MJPEG at `-q:v 5` | 41 KB | **8.2 Mbps** |
+
+  5.5×, inside the 5–10× band this section predicted. That is the cost of a client that decodes
+  nothing, and the reason `MaxWidth` exists.
+- **The picture reader was checked against 250 real JPEGs**, including reading them one byte at a
+  time: concatenating what came out reproduced the input exactly.
+
+## What building it changed
+
+- **`IFrameReader` gained `Describe`.** The pipeline used to wait for a parameter set and build an
+  RFC 6381 string itself, which is an Annex-B assumption sitting in a class that is supposed to know
+  nothing about codecs. A picture stream is described by its first picture; an Annex-B stream has to
+  wait for a keyframe. Asking the reader moved that difference to the one place that already differs.
+- **The picture path decodes on the device and encodes on the CPU.** `-hwaccel` without
+  `-hwaccel_output_format`: the JPEG encoder is software, so device frames produce "Impossible to
+  convert between the formats" at the first picture. It is also the honest shape of the mode — the
+  expensive half is the decode, and that still runs on the GPU.
+- **A profile's encoder tuning is not applied here.** `-preset p1 -tune ll` handed to `mjpeg` is an
+  error rather than a no-op, so in this mode a profile selects the *decoder* and nothing else.
+- **`RejectIfNotYetImplemented` is gone entirely**, and with it the `501` from `POST /api/watch`.
+  Every plan the planner can produce is now executable.
 
 ---
 

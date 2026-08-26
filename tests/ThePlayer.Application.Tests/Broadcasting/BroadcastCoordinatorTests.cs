@@ -305,23 +305,71 @@ public class BroadcastCoordinatorTests
         }
     }
 
-    public class PhaseLimits : BroadcastCoordinatorTests
+    public class EveryMode : BroadcastCoordinatorTests
     {
         [Theory]
+        [InlineData(PlaybackMode.ClientDecoded)]
+        [InlineData(PlaybackMode.ServerAssisted)]
         [InlineData(PlaybackMode.ServerDecoded)]
-        public async Task Modes_that_are_not_built_yet_say_so_rather_than_failing_obscurely(PlaybackMode mode)
+        public async Task All_three_modes_are_served(PlaybackMode mode)
         {
-            // A capable client, so the request gets past availability and reaches the phase limit.
-            // Passing ClientDecodeSupport.None here would fail for a different and legitimate
-            // reason - the mode being genuinely unavailable rather than merely unbuilt.
+            // Since Phase 5 there is no mode the planner can produce that the coordinator refuses.
+            // A capable client, so a genuine unavailability does not masquerade as one.
             var capable = new ClientDecodeSupport(
                 WebCodecsAvailable: true,
                 [new CodecSupport(VideoCodec.H264, Supported: true, HardwareAccelerated: true)]);
 
-            var act = async () => await _coordinator.AttachAsync(Address(), mode, capable);
+            var ticket = await _coordinator.AttachAsync(Address(), mode, capable);
 
-            (await act.Should().ThrowAsync<NotSupportedException>())
-                .Which.Message.Should().Contain("Phase");
+            ticket.Mode.Should().Be(mode);
+        }
+
+        [Fact]
+        public async Task Full_server_decoding_sends_pictures_over_a_socket()
+        {
+            // The third mode, and the only one where the client decodes no video at all. It is
+            // converted by definition - decoding is the entire point - and it is delivered over
+            // the frame socket rather than WebRTC, because a browser has no decoder to negotiate.
+            var capable = new ClientDecodeSupport(
+                WebCodecsAvailable: true,
+                [new CodecSupport(VideoCodec.H264, Supported: true, HardwareAccelerated: true)]);
+
+            var ticket = await _coordinator.AttachAsync(Address(), PlaybackMode.ServerDecoded, capable);
+
+            ticket.Converted.Should().BeTrue("the server decodes and re-encodes every frame");
+            ticket.FrameSocketPath.Should().Be($"/ws/frames/{ticket.ViewerId}");
+            ticket.WhepUrl.Should().BeNull();
+
+            await _framePipeline.Received(1).StartAsync(
+                Arg.Any<MediaAddress>(),
+                Arg.Is<BroadcastPlan>(plan => plan.OutputCodec == VideoCodec.Mjpeg),
+                Arg.Any<VideoFormat>(),
+                Arg.Any<CancellationToken>());
+        }
+
+        [Fact]
+        public async Task The_three_modes_of_one_address_do_not_share_a_pipeline()
+        {
+            // They need different bytes, so they get different keys - which is what stops the
+            // three-way comparison quietly measuring one stream three times.
+            var capable = new ClientDecodeSupport(
+                WebCodecsAvailable: true,
+                [new CodecSupport(VideoCodec.H264, Supported: true, HardwareAccelerated: true)]);
+
+            foreach (var mode in new[]
+                     {
+                         PlaybackMode.ClientDecoded,
+                         PlaybackMode.ServerAssisted,
+                         PlaybackMode.ServerDecoded,
+                     })
+            {
+                await _coordinator.AttachAsync(Address(), mode, capable);
+            }
+
+            var live = await _coordinator.ListAsync();
+
+            live.Should().HaveCount(3);
+            live.Select(broadcast => broadcast.Key).Should().OnlyHaveUniqueItems();
         }
 
         [Fact]
@@ -417,15 +465,15 @@ public class BroadcastCoordinatorTests
         }
 
         [Fact]
-        public async Task An_unavailable_mode_fails_differently_from_an_unbuilt_one()
+        public async Task A_mode_this_browser_cannot_use_is_refused_with_a_reason()
         {
-            // Worth distinguishing: "your browser cannot do this" is permanent and the user can
-            // act on it, while "this phase does not do it yet" is temporary and they cannot.
+            // The only refusal left. It is permanent and the user can act on it, which is the
+            // opposite of the phase limits this replaced.
             var act = async () => await _coordinator.AttachAsync(
                 Address(), PlaybackMode.ClientDecoded, ClientDecodeSupport.None);
 
             (await act.Should().ThrowAsync<InvalidOperationException>())
-                .Which.Should().NotBeOfType<NotSupportedException>();
+                .Which.Message.Should().NotBeNullOrWhiteSpace();
         }
 
         [Fact]

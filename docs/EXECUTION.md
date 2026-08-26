@@ -18,7 +18,7 @@ appearing in a browser, and which file to open when you want to change something
 |---|---|
 | [0 · Orientation](#0--orientation) | processes, ports, and who does what |
 | [1 · Architecture](#1--architecture) | layers, ports and adapters, where each concern lives |
-| [2 · Execution and flow](#2--execution-and-flow) | startup · playback · conversion · sharing · teardown · health · metrics · failure |
+| [2 · Execution and flow](#2--execution-and-flow) | startup · playback · conversion · server decoding · sharing · teardown · health · metrics · failure |
 | [3 · Every file](#3--every-file-and-what-it-is-for) | file-by-file tour of the whole repository |
 | [4 · Declared but not wired up](#4--declared-but-not-yet-wired-up) | seams left for later phases |
 
@@ -177,7 +177,7 @@ Six paths. Every step names the file that performs it.
 | 7 | `BroadcastCoordinator.cs:248-280` | `GetFormatAsync` | The result is cached for `FormatCacheDuration` (5 min) per address fingerprint, so a popular stream is not re-probed for every viewer |
 | 8 | [`BroadcastPlanner.cs:41-73`](../src/ThePlayer.Application/Broadcasting/BroadcastPlanner.cs#L41-L73) | `Plan` | A **pure function** of `(format, mode, clientSupport, hardware)` → passthrough or convert-to-X. No I/O, no state, nothing injected — which is what turns the negotiation table into plain unit tests |
 | 9 | `BroadcastPlanner.cs:82-128` | `Availability` | Separately returns **every** mode with a human sentence for the unavailable ones. A greyed-out control with no explanation is worse than no control at all |
-| 10 | [`BroadcastCoordinator.cs`](../src/ThePlayer.Application/Broadcasting/BroadcastCoordinator.cs) | `RejectIfNotYetImplemented` | One branch left since Phase 3: `ServerDecoded` throws → `501` naming Phase 5. Every other plan the planner produces is now executable |
+| 10 | [`BroadcastCoordinator.cs`](../src/ThePlayer.Application/Broadcasting/BroadcastCoordinator.cs) | `AttachAsync` | Nothing is rejected here any more. Phase 5 removed the last phase guard, so every plan the planner produces is executable and the only refusal left comes from the planner itself |
 | 11 | [`Broadcast.cs:55`](../src/ThePlayer.Domain/Broadcasting/Broadcast.cs#L55) | `BroadcastPlan.KeyFor` | Key = `{fingerprint}-{mode}-{codec}[-converted]`. Built from the SHA-256 fingerprint, never the address, so a password cannot become a dictionary key |
 | 12 | `BroadcastCoordinator.cs:113-124` | `AttachAsync` | Key already present → `Attach`, share the running pipeline, return |
 | 13 | [`BroadcastCoordinator.cs:127-135`](../src/ThePlayer.Application/Broadcasting/BroadcastCoordinator.cs#L127-L135) | `AttachAsync` | Otherwise publish to MediaMTX **before** the broadcast becomes visible, so a viewer never sees one it cannot yet play. If publishing throws, nothing has been registered |
@@ -265,7 +265,44 @@ run to find, because every unit test in the suite passed. The fix is not the one
 `DeliveredCodec` being public: the muxer at one end of the pipe and the reader at the other now ask
 one function rather than each deriving the answer.
 
-### 2.5 How broadcasts are shared
+### 2.5 Playback — full server decoding
+
+The third mode, and the far end of the trade. Everything above asks the browser to decode something;
+this asks it to decode nothing at all.
+
+```
+   FFmpeg                    JpegPictureReader        server-decoded-player
+     │                             │                          │
+     │ -hwaccel cuda  (decode on the device)                   │
+     │ -c:v mjpeg     (encode on the CPU)                      │
+     ├── FF D8 ... FF D9 ────────▶│ split on the image's own markers
+     │                             ├── one whole JPEG ────────▶│ createImageBitmap
+     │                             │                           │  → drawImage → close()
+```
+
+| # | File | What happens |
+|---|---|---|
+| 1 | [`BroadcastPlanner.cs`](../src/ThePlayer.Application/Broadcasting/BroadcastPlanner.cs) | `ServerDecoded` always converts, to MJPEG. Unchanged since Phase 1 - a full decode is the mode's entire purpose, so there is no pass-through case to weigh |
+| 2 | [`FFmpegArgumentBuilder.cs`](../src/ThePlayer.Infrastructure/FFmpeg/FFmpegArgumentBuilder.cs) | `-hwaccel cuda … -c:v mjpeg -q:v 5 -f mjpeg -`. **No `-hwaccel_output_format`**: the JPEG encoder is software, and device frames fail at the first picture. The decode still runs on the GPU, which is the expensive half |
+| 3 | Same | No bitstream filter, and no `-bf` or `-g`. Nothing to inject, no B-frames to disable, no group of pictures to bound |
+| 4 | [`FrameReaders.For`](../src/ThePlayer.Infrastructure/FFmpeg/FrameReaders.cs) | Picks the reader from what FFmpeg was asked to produce, beside the function that decided it |
+| 5 | `JpegPictureReader` | Splits on `FF D8` / `FF D9`, tracking whether it is inside a scan - those bytes occur as data, and a reader that ignores that produces images whose lower half is grey |
+| 6 | `FFmpegFrameStream.InitialiseAsync` | Returns at the **first picture**. There is nothing to wait for: no parameter sets, no keyframe, no reference chain |
+| 7 | `server-decoded-player.component.ts` | `createImageBitmap` → `drawImage` → `close()`. The same discipline the WebCodecs path needs, for the same reason |
+
+#### What the mode costs
+
+Measured on one 720p clip over the same socket, and the reason `PictureOptions` exists:
+
+| Mode | Mean payload | At 25fps |
+|---|---|---|
+| `ClientDecoded`, H.265 passed through | 7.5 KB | 1.5 Mbps |
+| `ServerDecoded`, MJPEG at `-q:v 5` | 41 KB | 8.2 Mbps |
+
+MJPEG has no inter-frame compression at all, so every frame pays full price. That is what buys a
+client which runs no decoder, and it is a good trade on a LAN and a poor one over a WAN.
+
+### 2.6 How broadcasts are shared
 
 The key is what decides whether two viewers share one FFmpeg process:
 
@@ -282,7 +319,7 @@ Two viewers wanting the same bytes share one pipeline. Two clients needing *diff
 their own pipelines from the same upstream — which is exactly right, and falls out of the key rather
 than needing any special handling.
 
-### 2.6 Teardown
+### 2.7 Teardown
 
 ```
    last viewer leaves                     BroadcastSweeper ticks every 2s
@@ -308,7 +345,7 @@ The linger window is the point of the whole path: without it, a page refresh tea
 process and immediately rebuilds it, costing a reconnection to the camera and several seconds of
 black screen.
 
-### 2.7 Health
+### 2.8 Health
 
 | # | File | What happens |
 |---|---|---|
@@ -321,7 +358,7 @@ black screen.
 Hardware acceleration is deliberately **not** a health input. A machine that can only encode with
 libx264 still plays video, and reporting it unhealthy would page someone for nothing.
 
-### 2.8 Metrics
+### 2.9 Metrics
 
 What the server is doing, once a second, to every browser watching.
 
@@ -365,13 +402,12 @@ The fix carried a smaller lesson of its own. `PROCESSENTRY32` needs `CharSet.Uni
 refuses, silently, because the failure path returns an empty map. The symptom was every process on
 the machine appearing to have no children.
 
-### 2.9 When it fails
+### 2.10 When it fails
 
 | Status | Raised by | When |
 |---|---|---|
 | `400` | `Endpoints.cs:69` / `:74` | The address or mode could not be parsed |
 | `400` | `Endpoints.cs:99` ← `BroadcastPlanner.Plan` | The mode is unavailable for this stream on this client |
-| `501` | `Endpoints.cs:105` ← `RejectIfNotYetImplemented` | Valid request this phase cannot serve; `detail` names the phase that will |
 | `502` | `Endpoints.cs:93` ← `FFmpegMediaInspector` | The upstream could not be read: unreachable, wrong credentials, or not a video |
 
 All four are RFC 7807 problem documents whose `detail` is written to be shown to a user as-is, and is
@@ -434,7 +470,8 @@ In dependency order. The last column is the thing worth knowing that the filenam
 | [`MediaServer/MediaMtxPaths.cs`](../src/ThePlayer.Infrastructure/MediaServer/MediaMtxPaths.cs) | 190 | `IMediaServer` — registers paths over the control API | The failure body echoes the configuration just sent, which for a camera contains the password — so it is scrubbed before it becomes an exception message. `RemoveAsync` never fails the caller: removal is cleanup. `ReservePublishPathAsync` posts an **empty** configuration, which MediaMTX reads as a path waiting for a publisher |
 | [`MediaServer/MediaMtxPublishingPipeline.cs`](../src/ThePlayer.Infrastructure/MediaServer/MediaMtxPublishingPipeline.cs) | 370 | `IPublishingPipeline` — transcode and push into MediaMTX *(Phase 3)* | Owns the process rather than using MediaMTX's `runOnDemand`, so an encoder that will not open is distinguishable from a camera that is offline. `-progress pipe:1` is the readiness signal: the first `frame=` counted is the earliest moment at which "video is reaching MediaMTX" is true rather than hoped for |
 | [`MediaServer/MediaMtxServer.cs`](../src/ThePlayer.Infrastructure/MediaServer/MediaMtxServer.cs) | 457 | `MediaMtxOptions` + `MediaMtxSupervisor` | The largest file in the repo; [§2.1](#21--startup-dotnet-run) is its walkthrough. `Supervise: false` switches it to monitor-only, for when MediaMTX runs in a container or by hand |
-| [`FFmpeg/FrameReaders.cs`](../src/ThePlayer.Infrastructure/FFmpeg/FrameReaders.cs) | 300 | `ReadFrame` · `IFrameReader` · `CompressedFrameReader` | Two bugs lived here and both needed real encoder output to find: parameter sets arriving before the first delimiter are not a picture of their own, and a rescan resuming *inside* a four-byte start code finds a phantom three-byte one |
+| [`FFmpeg/FrameReaders.cs`](../src/ThePlayer.Infrastructure/FFmpeg/FrameReaders.cs) | 540 | `ReadFrame` · `IFrameReader` · `CompressedFrameReader` · `JpegPictureReader` · `FrameReaders` | Two bugs lived here and both needed real encoder output to find: parameter sets arriving before the first delimiter are not a picture of their own, and a rescan resuming *inside* a four-byte start code finds a phantom three-byte one. `Describe` is on the interface because the two readers answer it from different places - one waits for a parameter set, the other is settled by its first picture |
+| [`FFmpeg/PictureOptions.cs`](../src/ThePlayer.Infrastructure/FFmpeg/PictureOptions.cs) | 35 | Quality and size for the picture mode *(Phase 5)* | Configurable because the tradeoff changes with the network: 8.2 Mbps measured against 1.5 for the same feed passed through |
 | [`FFmpeg/CodecStringBuilder.cs`](../src/ThePlayer.Infrastructure/FFmpeg/CodecStringBuilder.cs) | 210 | RFC 6381 strings from parameter sets | H.264 is three bytes copied out. H.265 needs a bit reader, emulation-prevention stripping, and the 32 compatibility flags reversed — `0x60000000` becomes `6` |
 | [`FFmpeg/FFmpegStreamingPipeline.cs`](../src/ThePlayer.Infrastructure/FFmpeg/FFmpegStreamingPipeline.cs) | 430 | `IFramePipeline` · `EncoderRefusedException` · `FFmpegFrameStream` | `StartAsync` returns only once parameter sets have arrived, buffering what it read while waiting. On Windows with a Chocolatey FFmpeg the spawned process is a *shim* whose real ffmpeg is its child, which is why `Kill(entireProcessTree: true)` is load-bearing. Since Phase 3 it walks the engine ranking, and the frame stream is built from the **delivered** codec, not the source's |
 | [`FFmpeg/FFmpegArgumentBuilder.cs`](../src/ThePlayer.Infrastructure/FFmpeg/FFmpegArgumentBuilder.cs) | 220 | Plan + profile → command line, for both destinations *(Phase 3)* | Pure and static, so every decision this phase makes is a plain assertion on a string. `-hwaccel` is an **input** option: placed after `-i` it is silently ignored and the decode quietly happens on the CPU, which looks like a slow machine rather than a bug |

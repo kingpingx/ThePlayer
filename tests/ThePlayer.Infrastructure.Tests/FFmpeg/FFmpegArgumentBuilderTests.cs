@@ -213,13 +213,12 @@ public class FFmpegArgumentBuilderTests
         }
 
         [Fact]
-        public void Refuses_to_frame_a_codec_that_has_no_annex_b()
+        public void Refuses_to_frame_a_codec_nothing_can_read()
         {
-            // MJPEG is Phase 5 and needs a different reader. Guessing here would produce a stream
-            // the frame reader silently fails to split.
+            // Guessing here would produce a stream the frame reader silently fails to split.
             var plan = new BroadcastPlan(
-                PlaybackMode.ServerDecoded,
-                VideoCodec.Mjpeg,
+                PlaybackMode.ClientDecoded,
+                VideoCodec.Av1,
                 RequiresConversion: true,
                 AccelerationProfile.Software);
 
@@ -227,6 +226,128 @@ public class FFmpegArgumentBuilderTests
                 File(), H265, plan, AccelerationProfile.Software, ConnectTimeout);
 
             act.Should().Throw<ArgumentOutOfRangeException>();
+        }
+    }
+
+    /// <summary>
+    /// The mode where the server decodes everything and the client decodes nothing.
+    /// </summary>
+    public class SendingPictures : FFmpegArgumentBuilderTests
+    {
+        private static BroadcastPlan Decoding(AccelerationProfile profile) =>
+            new(PlaybackMode.ServerDecoded, VideoCodec.Mjpeg, RequiresConversion: true, profile);
+
+        [Fact]
+        public void Encodes_JPEG_images_rather_than_video()
+        {
+            var arguments = FFmpegArgumentBuilder.ForFrameStream(
+                File(), H265, Decoding(Nvidia), Nvidia, ConnectTimeout);
+
+            arguments.Should().Contain("-c:v mjpeg");
+            arguments.Should().Contain("-f mjpeg -");
+        }
+
+        [Fact]
+        public void Carries_no_bitstream_filter()
+        {
+            // JPEG images delimit themselves - FF D8 opens one, FF D9 closes it - so there is
+            // nothing to inject and nothing for a filter to do.
+            var arguments = FFmpegArgumentBuilder.ForFrameStream(
+                File(), H265, Decoding(Nvidia), Nvidia, ConnectTimeout);
+
+            arguments.Should().NotContain("-bsf:v");
+            arguments.Should().NotContain("aud=insert");
+        }
+
+        [Fact]
+        public void Decodes_on_the_device_but_brings_the_frames_back()
+        {
+            // The half that catches a real failure. The JPEG encoder is software, so device frames
+            // produce "Impossible to convert between the formats" at the first picture - while the
+            // hardware decode is still worth having, because this mode exists to make the server
+            // pay for everything.
+            var arguments = FFmpegArgumentBuilder.ForFrameStream(
+                File(), H265, Decoding(Nvidia), Nvidia, ConnectTimeout);
+
+            arguments.Should().Contain("-hwaccel cuda");
+            arguments.Should().NotContain("-hwaccel_output_format");
+        }
+
+        [Fact]
+        public void Ignores_the_H264_tuning_a_profile_carries()
+        {
+            // -preset p1 -tune ll handed to the mjpeg encoder is an error, not a no-op.
+            var arguments = FFmpegArgumentBuilder.ForFrameStream(
+                File(), H265, Decoding(Nvidia), Nvidia, ConnectTimeout);
+
+            arguments.Should().NotContain("-preset");
+            arguments.Should().NotContain("-tune");
+            arguments.Should().NotContain("h264_nvenc");
+        }
+
+        [Fact]
+        public void Sets_no_GOP_or_B_frames()
+        {
+            // Every JPEG is independent, so neither has anything to say here.
+            var arguments = FFmpegArgumentBuilder.ForFrameStream(
+                File(), H265, Decoding(Nvidia), Nvidia, ConnectTimeout);
+
+            arguments.Should().NotContain("-bf ");
+            arguments.Should().NotContain("-g ");
+        }
+
+        [Fact]
+        public void Uses_the_configured_quality()
+        {
+            var arguments = FFmpegArgumentBuilder.ForFrameStream(
+                File(), H265, Decoding(Nvidia), Nvidia, ConnectTimeout,
+                new PictureOptions { Quality = 12 });
+
+            arguments.Should().Contain("-q:v 12");
+        }
+
+        [Fact]
+        public void Scales_down_when_a_maximum_width_is_configured()
+        {
+            // The only real defence against what this mode costs on a network: MJPEG has no
+            // inter-frame compression at all.
+            var arguments = FFmpegArgumentBuilder.ForFrameStream(
+                File(), H265, Decoding(Nvidia), Nvidia, ConnectTimeout,
+                new PictureOptions { MaxWidth = 640 });
+
+            arguments.Should().Contain("-vf scale=640:-2", "-2 keeps the aspect and an even height");
+        }
+
+        [Fact]
+        public void Does_not_scale_a_source_that_is_already_small_enough()
+        {
+            var small = H265 with { Width = 320, Height = 240 };
+
+            var arguments = FFmpegArgumentBuilder.ForFrameStream(
+                File(), small, Decoding(Nvidia), Nvidia, ConnectTimeout,
+                new PictureOptions { MaxWidth = 640 });
+
+            arguments.Should().NotContain("scale=", "upscaling would cost bandwidth and add nothing");
+        }
+
+        [Fact]
+        public void Sends_pictures_at_source_size_by_default()
+        {
+            var arguments = FFmpegArgumentBuilder.ForFrameStream(
+                File(), H265, Decoding(Nvidia), Nvidia, ConnectTimeout);
+
+            arguments.Should().NotContain("scale=");
+        }
+
+        [Fact]
+        public void The_delivered_codec_is_the_one_the_arguments_mux()
+        {
+            var plan = Decoding(Nvidia);
+
+            FFmpegArgumentBuilder.DeliveredCodec(plan).Should().Be(VideoCodec.Mjpeg);
+
+            FFmpegArgumentBuilder.ForFrameStream(File(), H265, plan, Nvidia, ConnectTimeout)
+                .Should().Contain("-f mjpeg -");
         }
     }
 

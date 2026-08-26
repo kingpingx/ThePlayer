@@ -21,9 +21,9 @@ namespace ThePlayer.Infrastructure.FFmpeg;
 /// broadcast is torn down, so its output is consumed incrementally rather than captured.
 /// </para>
 /// <para>
-/// Parameterised by the FFmpeg arguments and the frame reader, so Phase 5 adds a third mode by
-/// supplying different arguments and a second <see cref="IFrameReader"/> rather than by editing
-/// anything here.
+/// Parameterised by the FFmpeg arguments and the frame reader, which is what let the third mode
+/// arrive as different arguments and a second <see cref="IFrameReader"/> rather than as a branch
+/// through this class. Nothing here knows which of the three it is running.
 /// </para>
 /// <para>
 /// Since Phase 3 it also converts. A plan that needs an encoder is attempted on the engine the
@@ -32,11 +32,13 @@ namespace ThePlayer.Infrastructure.FFmpeg;
 /// </remarks>
 public sealed class FFmpegStreamingPipeline(
     IOptions<FFmpegOptions> options,
+    IOptions<PictureOptions> pictureOptions,
     IHardwareInspector hardwareInspector,
     EncoderFallbackLog fallbackLog,
     ILogger<FFmpegStreamingPipeline> logger) : IFramePipeline
 {
     private readonly FFmpegOptions _options = options.Value;
+    private readonly PictureOptions _pictures = pictureOptions.Value;
 
     public async Task<IFrameStream> StartAsync(
         MediaAddress address,
@@ -105,7 +107,8 @@ public sealed class FFmpegStreamingPipeline(
             format,
             plan,
             profile,
-            _options.RtspConnectTimeout);
+            _options.RtspConnectTimeout,
+            _pictures);
 
         logger.LogDebug("Starting frame pipeline: ffmpeg {Arguments}", address.Scrub(arguments));
 
@@ -134,12 +137,14 @@ public sealed class FFmpegStreamingPipeline(
                 ex);
         }
 
-        // Asked of the builder rather than worked out again here, so the reader at this end of the
-        // pipe cannot disagree with the muxer at the other.
+        // Both asked of the same pair of functions rather than worked out again here, so the
+        // reader at this end of the pipe cannot disagree with the muxer at the other.
+        var delivered = FFmpegArgumentBuilder.DeliveredCodec(plan);
+
         var stream = new FFmpegFrameStream(
             process,
             format,
-            FFmpegArgumentBuilder.DeliveredCodec(plan),
+            FrameReaders.For(delivered),
             address,
             logger);
 
@@ -213,15 +218,15 @@ internal sealed class FFmpegFrameStream : IFrameStream
     private readonly VideoFormat _format;
 
     /// <summary>
-    /// What is coming out of FFmpeg, which is not always what went in.
+    /// Splits the output into pictures, and says when it has seen enough to describe the stream.
     /// </summary>
     /// <remarks>
-    /// The distinction only appears once conversion exists, and getting it wrong fails in a way
-    /// that points nowhere useful: an H.264 stream read as HEVC yields no parameter sets, so the
-    /// pipeline reports that the source "ended before it produced a decodable frame" while FFmpeg
-    /// sits there having converted it perfectly well.
+    /// Chosen from what FFmpeg was asked to <em>produce</em>, never from what went in. Getting that
+    /// wrong fails in a way that points nowhere useful: an H.264 stream read as HEVC yields no
+    /// parameter sets, so the pipeline reports that the source "ended before it produced a
+    /// decodable frame" while FFmpeg sits there having converted it perfectly well.
     /// </remarks>
-    private readonly VideoCodec _deliveredCodec;
+    private readonly IFrameReader _reader;
 
     private readonly MediaAddress _address;
     private readonly ILogger _logger;
@@ -238,17 +243,16 @@ internal sealed class FFmpegFrameStream : IFrameStream
     public FFmpegFrameStream(
         Process process,
         VideoFormat format,
-        VideoCodec deliveredCodec,
+        IFrameReader reader,
         MediaAddress address,
         ILogger logger)
     {
         _process = process;
         _format = format;
-        _deliveredCodec = deliveredCodec;
+        _reader = reader;
         _address = address;
         _logger = logger;
 
-        var reader = new CompressedFrameReader(deliveredCodec);
         _frames = reader
             .ReadAsync(process.StandardOutput.BaseStream, _lifetime.Token)
             .GetAsyncEnumerator(_lifetime.Token);
@@ -308,9 +312,10 @@ internal sealed class FFmpegFrameStream : IFrameStream
     /// Reads until the stream describes itself, buffering whatever arrives in the meantime.
     /// </summary>
     /// <remarks>
-    /// The codec string comes from the parameter sets, and <c>dump_extra</c> puts those in front of
-    /// every keyframe - so this returns as soon as the first keyframe arrives, which for a live
-    /// camera is the first GOP boundary rather than the first byte.
+    /// <b>When</b> a stream can describe itself is the reader's business, not this method's. An
+    /// Annex-B stream waits for parameter sets, which <c>dump_extra</c> puts in front of every
+    /// keyframe - on a live camera that is the first GOP boundary rather than the first byte. A
+    /// picture stream is described by its first picture, because every picture is independent.
     /// </remarks>
     public async Task InitialiseAsync(TimeSpan timeout, CancellationToken cancellationToken)
     {
@@ -324,7 +329,7 @@ internal sealed class FFmpegFrameStream : IFrameStream
                 var frame = Wrap(_frames.Current);
                 _buffered.Add(frame);
 
-                if (_frames.Current.SequenceParameterSet is not { } sps)
+                if (_reader.Describe(_frames.Current) is not { } codec)
                 {
                     continue;
                 }
@@ -333,7 +338,7 @@ internal sealed class FFmpegFrameStream : IFrameStream
                 // codec, never the picture. The codec string, though, describes what the client
                 // will actually be handed.
                 _initialisation = new StreamInitialisation(
-                    CodecStringBuilder.Build(_deliveredCodec, sps),
+                    codec,
                     _format.Width,
                     _format.Height,
                     _format.FrameRate);

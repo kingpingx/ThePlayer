@@ -36,7 +36,6 @@ public static class Endpoints
             .Produces<WatchResponse>()
             .ProducesProblem(StatusCodes.Status400BadRequest)
             .ProducesProblem(StatusCodes.Status403Forbidden)
-            .ProducesProblem(StatusCodes.Status501NotImplemented)
             .ProducesProblem(StatusCodes.Status502BadGateway);
 
         app.MapDelete("/api/watch/{viewerId}", async (
@@ -132,12 +131,6 @@ public static class Endpoints
             // The planner rejected this mode for this stream and client - the reason is written
             // to be shown to a user.
             return Problem(StatusCodes.Status400BadRequest, "Mode not available", ex.Message);
-        }
-        catch (NotSupportedException ex)
-        {
-            // A real plan that this phase cannot execute yet. 501 rather than 400: the request is
-            // valid, the server just does not do it yet.
-            return Problem(StatusCodes.Status501NotImplemented, "Not implemented yet", ex.Message);
         }
     }
 

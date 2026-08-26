@@ -43,6 +43,16 @@ public sealed class GeneratedMedia : IAsyncLifetime
 
     public string H265AnnexB => Path.Combine(_root, "h265.annexb");
 
+    /// <summary>
+    /// The same clip as the server-decoding pipeline would produce it: a stream of whole JPEGs.
+    /// </summary>
+    /// <remarks>
+    /// Encoded at the default quality rather than a low one, deliberately. A high-quality JPEG is
+    /// large enough to span several reads of the pipeline's buffer, which is where a reader that
+    /// mishandles a marker straddling a read boundary gives itself away.
+    /// </remarks>
+    public string Mjpeg => Path.Combine(_root, "pictures.mjpeg");
+
     public async Task InitializeAsync()
     {
         Directory.CreateDirectory(_root);
@@ -68,6 +78,11 @@ public sealed class GeneratedMedia : IAsyncLifetime
         await RunAsync(
             $"-y -hide_banner -loglevel error -i \"{H265File}\" -an -c:v copy " +
             $"-bsf:v hevc_metadata=aud=insert,dump_extra=freq=keyframe -f hevc \"{H265AnnexB}\"");
+
+        // No bitstream filter and no delimiters: JPEG images carry their own boundaries.
+        await RunAsync(
+            $"-y -hide_banner -loglevel error -i \"{H264File}\" -an -c:v mjpeg -q:v 5 " +
+            $"-f mjpeg \"{Mjpeg}\"");
     }
 
     public Task DisposeAsync()

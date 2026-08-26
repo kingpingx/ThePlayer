@@ -9,6 +9,47 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## Unreleased
 
+### Phase 5: Full server decoding and the three-way comparison
+
+The third mode, and the only one where the browser decodes no video at all. The server decodes every
+frame and sends whole JPEG images; `createImageBitmap` unpacks them onto a canvas.
+
+With it the comparison the project exists to make is complete, and it inverts as it should — the
+mode that is cheapest for the client is the one the server pays most for, and the page shows both
+halves at once.
+
+**A small phase, and deliberately so.** Phase 2 built the pipeline parameterised by its FFmpeg
+arguments and its frame reader, so the third mode arrived as new arguments plus a second
+`IFrameReader` rather than as a branch through anything that already existed. That is the payoff
+from merging the two frame pipelines during planning rather than writing two near-duplicates.
+
+#### Added
+
+- **`JpegPictureReader`** — splits an MJPEG stream on its own markers. Far simpler than Annex-B,
+  because JPEG images are self-delimiting: `FF D8` opens one and `FF D9` closes it, so nothing has
+  to be injected to find boundaries. It does have to track whether it is inside a scan, where those
+  same bytes occur as data — getting that wrong produces images whose lower half is grey.
+- **`server-decoded-player`** — no `VideoDecoder` anywhere in it. It does keep the same discipline
+  the WebCodecs path needs: an `ImageBitmap` holds memory the collector will not reclaim, so every
+  one is closed in a `finally`.
+- **`PictureOptions`** — `Quality` and `MaxWidth`. MJPEG has no inter-frame compression, and the
+  measured cost on a 720p clip is 8.2 Mbps against 1.5 for the same feed passed through. On a LAN
+  that buys a client that decodes nothing; over a WAN it is why the mode needs a scale filter.
+- The diagnostics overlay now labels the client's own cost per mode, so "unpack" and "decode" are
+  not confused for each other.
+
+#### Changed
+
+- **`IFrameReader` gained `Describe`.** The pipeline used to wait for a parameter set and derive an
+  RFC 6381 string itself — an Annex-B assumption living in a class that is meant to know nothing
+  about codecs. Readers answer it now, because the two answer it from genuinely different places.
+- The picture path decodes on the device and encodes on the CPU: `-hwaccel` without
+  `-hwaccel_output_format`, since the JPEG encoder is software and device frames would fail at the
+  first picture. A profile therefore selects the decoder in this mode and nothing else — its H.264
+  tuning is not applied, because `-preset p1` handed to `mjpeg` is an error rather than a no-op.
+- **`RejectIfNotYetImplemented` is gone**, and with it the `501` from `POST /api/watch`. There is no
+  longer a plan the planner can produce that the coordinator refuses.
+
 ### Phase 4: Server CPU and GPU in the client
 
 The browser now shows what the choice costs the machine at the other end, live. Toggle a mode on an

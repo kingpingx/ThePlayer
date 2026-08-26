@@ -168,8 +168,6 @@ public sealed class BroadcastCoordinator(
         var availability = planner.Availability(format, clientSupport);
         var plan = planner.Plan(format, mode, clientSupport, hardware);
 
-        RejectIfNotYetImplemented(plan);
-
         var key = plan.KeyFor(address.Fingerprint);
         var viewerId = Guid.NewGuid().ToString("n")[..16];
 
@@ -608,22 +606,4 @@ public sealed class BroadcastCoordinator(
             FrameSocketPath: broadcast.Plan.Mode == PlaybackMode.ServerAssisted
                 ? null
                 : $"/ws/frames/{viewerId}");
-
-    /// <summary>
-    /// Rejects a plan this phase cannot execute - loudly, with the phase named - rather than
-    /// letting a viewer attach to a pipeline that will never produce a frame.
-    /// </summary>
-    /// <remarks>
-    /// Phase 2 added the frame socket and Phase 3 the encoder, so every plan the planner produces
-    /// is now executable except one: full server decoding, which delivers pictures rather than a
-    /// compressed stream and needs a different reader to do it.
-    /// </remarks>
-    private static void RejectIfNotYetImplemented(BroadcastPlan plan)
-    {
-        if (plan.Mode == PlaybackMode.ServerDecoded)
-        {
-            throw new NotSupportedException(
-                "Full server decoding arrives in Phase 5. Use ClientDecoded or ServerAssisted for now.");
-        }
-    }
 }

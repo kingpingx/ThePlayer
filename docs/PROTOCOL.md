@@ -15,9 +15,9 @@ Everything is JSON, camel-cased, over HTTP. Three transports:
 
 ---
 
-## Status: Phase 4
+## Status: Phase 5
 
-Every endpoint below is built. `GET /api/health`, `POST /api/watch`,
+Every endpoint below is built, and all three playback modes are served. `GET /api/health`, `POST /api/watch`,
 `DELETE /api/watch/{viewerId}`, `GET /api/broadcasts`, `WS /ws/frames/{viewerId}` and
 `GET /api/metrics/stream` all exist and are exercised by the player.
 
@@ -162,7 +162,6 @@ always scrubbed of credentials.
 | Status | When |
 |---|---|
 | `400` | The address or mode could not be parsed, or the mode is unavailable for this stream and client. |
-| `501` | A valid request this phase cannot serve yet — `detail` names the phase that will. |
 | `502` | The upstream could not be read: unreachable, wrong credentials, or not a video. |
 
 ```jsonc
@@ -230,6 +229,24 @@ Resolved before the upgrade, so a viewer id that is unknown - or one watching a 
   "frameRate": 25
 }
 ```
+
+### Two kinds of payload, one socket
+
+The transport was never about a codec, which is what lets the third mode reuse it unchanged. `codec`
+says which kind of payload follows:
+
+| `codec` | Payload | Client |
+|---|---|---|
+| An RFC 6381 string | One Annex-B access unit per message | `VideoDecoder` → canvas |
+| `mjpeg` | One complete JPEG per message | `createImageBitmap` → canvas |
+
+`mjpeg` is the one value here that is **not** an RFC 6381 string, because there is no useful one and
+nothing on that path configures a decoder. A client picks its renderer from the mode it asked for
+rather than by parsing this, since it has to build one before the socket has said anything.
+
+On the picture path every frame is flagged as a keyframe and carries no parameter sets, which is not
+a convention but a fact about JPEG: each image is independently decodable. A late joiner can start
+at any frame, and a dropped frame costs exactly that frame.
 
 Each binary message that follows carries a nine-byte header:
 

@@ -28,6 +28,7 @@ public static class ServiceRegistration
         services.AddOptionsWithValidation<AddressPolicyOptions>(configuration, AddressPolicyOptions.SectionName);
         services.AddOptionsWithValidation<MetricsOptions>(configuration, MetricsOptions.SectionName);
         services.AddOptionsWithValidation<GpuMetricsOptions>(configuration, GpuMetricsOptions.SectionName);
+        services.AddOptionsWithValidation<PictureOptions>(configuration, PictureOptions.SectionName);
 
         services.AddHttpClient();
 

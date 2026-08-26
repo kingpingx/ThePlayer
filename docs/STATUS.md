@@ -6,26 +6,27 @@ Where the project actually is, and where to pick it up.
 what is **built**, what is **not**, and what the next hour of work should be. Update it when a phase
 lands.
 
-*Last verified: 26 August 2026, on the branch that lands Phases 3 and 4.*
+*Last verified: 27 August 2026, on the branch that lands Phase 5.*
 
 ---
 
 ## Where things stand
 
-**Five phases done, one slice of a sixth.** An RTSP feed or a video file plays in a browser
-whatever codec it is in, you choose whether the browser or the server does the decoding, and the
-page shows what that choice costs the server while it happens.
+**Six phases done, one slice of a seventh.** An RTSP feed or a video file plays in a browser
+whatever codec it is in; the browser decodes everything, something, or nothing at all, as you
+choose; and the page shows what each choice costs at both ends while it happens.
 
-Phase 3 closed the last gap in the first sentence: **H.265 plays everywhere**, converted for a
-browser that cannot decode it and passed through untouched for one that can. Phase 4 made the
-difference visible rather than merely true. Two broadcasts of one file, side by side, one reading:
+Phase 5 finished the set. All three modes on one address, one reading of the metrics feed:
 
 ```
-cpu 15.9%  gpu 0%  enc 0%  dec 0%  | copying: 0.1% cpu
-cpu 23.2%  gpu 0%  enc 3%  dec 1%  | copying: 0.1% cpu | converting: 0.2% cpu
+cpu 15.9%  gpu 2%  enc 3%  dec 3%
+  | ClientDecoded copying:     0.1% cpu     <- server does no codec work
+  | ClientDecoded converting:  0.5% cpu     <- hardware transcode
+  | ServerDecoded converting:  2.4% cpu     <- decode plus a CPU JPEG encode
 ```
 
-That contrast *is* the project, and it is now something to look at rather than a claim.
+The cost profile inverts, which is the whole argument: the mode cheapest for the client is the one
+the server pays most for. It is now something to look at rather than a claim.
 
 | | Phase | Tag | State |
 |---|---|---|---|
@@ -34,24 +35,19 @@ That contrast *is* the project, and it is now something to look at rather than a
 | ✅ | 2 · Client-side decoding | `v0.3.0` | Done |
 | ✅ | 3 · Conversion | `v0.4.0` | Done — **not yet tagged** |
 | ✅ | 4 · Server metrics | `v0.5.0` | Done — **not yet tagged** |
+| ✅ | 5 · Full server decoding | `v0.6.0` | Done — **not yet tagged** |
 | 🟡 | 6 · Deployment *(partial)* | — | Container, Fly config and address policy done. **Auth not done.** |
-| ⬜ | 5 · Full server decoding | `v0.6.0` | Not started — **the next phase** |
 | ⬜ | 6 · Hardening *(rest)* | `v1.0.0` | Auth, process lifetime, docs |
 
-**230 tests, all passing** — 213 backend (Domain 38, Application 92, Infrastructure 73,
-Architecture 5, Api 5) and 17 in the player.
+**261 tests, all passing** — 238 backend (Domain 38, Application 96, Infrastructure 94,
+Architecture 5, Api 5) and 23 in the player.
 
-Roughly 8,260 lines of C# across four projects, plus a 22-file Angular workspace.
+Roughly 8,580 lines of C# across four projects, plus a 27-file Angular workspace.
 
-### What still returns `501`
+### Nothing returns `501` any more
 
-One path, and it is the honest measure of what is left:
-
-```
-ServerDecoded  → Phase 5
-```
-
-Everything else plays.
+Every mode the planner can offer is now served. The only refusal left is the planner's own — "this
+browser has no decoder for that" — which is permanent, actionable, and a `400`.
 
 ---
 
@@ -63,7 +59,7 @@ Everything else plays.
 ./tools/fetch-mediamtx.sh           # Linux / macOS
 
 dotnet build
-dotnet test                          # expect 213 passing
+dotnet test                          # expect 238 passing
 
 # Terminal 1 - the API. Launches and supervises MediaMTX itself.
 dotnet run --project src/ThePlayer.Api          # http://localhost:5172
@@ -131,6 +127,10 @@ listener and no sampling at all when nobody is watching. GPU encode and decode r
 because that split is what tells the three modes apart. Every figure nullable, because an idle GPU
 and a failed query are different facts that produce the same number if you let them.
 
+**Phase 5 — Full server decoding.** `JpegPictureReader`, a `server-decoded-player` with no
+`VideoDecoder` in it, and `PictureOptions` for the bandwidth. A small phase because Phase 2's
+pipeline was parameterised by its arguments and its reader, so the third mode edited neither.
+
 **Phase 6, partially — Deployment.** A container carrying everything, `fly.toml`, and `AddressGuard`,
 which bounds what the server will dial. Verified by building and running the image, not by
 inspection.
@@ -139,19 +139,7 @@ inspection.
 
 ## What is left
 
-### Phase 5 — Full server decoding · `v0.6.0` · **next**
-
-Small by design, and Phase 3 made it smaller. `FFmpegStreamingPipeline` is parameterised by its
-arguments and an `IFrameReader`, and `FFmpegArgumentBuilder` now owns the argument half — so this is
-an MJPEG branch there plus a `JpegPictureReader`, and no existing class rewritten. Both places that
-currently refuse MJPEG say so explicitly rather than guessing:
-`FFmpegArgumentBuilder.DeliveredCodec` and the `CompressedFrameReader` constructor.
-
-Phase 4 is what makes it worth building rather than merely completing the set. The three-way
-comparison only means something with the cost of each on screen beside it, and it now is: a full
-server decode should show the decoder engine busy and the client doing no decoding at all.
-
-### Phase 6 — The rest of hardening · `v1.0.0`
+### Phase 6 — The rest of hardening · `v1.0.0` · **next, and all that is left**
 
 **Auth is the one that matters** and is the reason this is not simply "deployable". Also: killing
 child processes with the parent (Job Object / `PR_SET_PDEATHSIG`), and the docs.
@@ -173,6 +161,7 @@ Known, deliberate, and written down rather than discovered later.
 | **GPU metrics are NVIDIA-only.** Intel and AMD machines get an availability state and a reason instead of figures — `intel_gpu_top` and `rocm-smi` are Linux-only and usually need privilege, and Windows exposes no per-engine split. CPU and per-broadcast figures work everywhere. | [PROTOCOL.md](PROTOCOL.md) |
 | **A GPU reading costs a process spawn per second** while anyone watches the feed, because `nvidia-smi --loop-ms` returns one good sample and then fails forever. Sampling stops when the last listener leaves, which is the only thing bounding it. | [ROADMAP.md](ROADMAP.md) |
 | **`IPublishedStream.Acceleration` is still uncalled.** Phase 4 reports what a broadcast costs but not which engine is spending it, so a host that fell back to libx264 shows a flat GPU graph with the explanation only in `/api/health`. | [EXECUTION.md](EXECUTION.md) §4 |
+| **MJPEG costs 5.5× the bandwidth**, measured: 8.2 Mbps against 1.5 for the same 720p feed passed through. `PictureOptions.MaxWidth` is the mitigation and is off by default, so the honest number is what a deployment sees first. | [ROADMAP.md](ROADMAP.md), [PROTOCOL.md](PROTOCOL.md) |
 | **The NVENC session limit is untested on real hardware.** The fallback was exercised end to end, but by making NVENC refuse a 32×32 stream — the development machine is a T550, which is professional silicon with no session cap. On a consumer GeForce the fourth concurrent broadcast is the real case. | Here |
 | **Five members are declared and never called** — `Broadcast.MarkFailed`, `IsPlayable`, `HasViewer`, `ClientDecodeSupport.CanDecodeInHardware`, `VideoCodecNames.ToProbeString` — plus `IPublishedStream.Acceleration`, a seam Phase 4 will read. | [EXECUTION.md](EXECUTION.md) §4 |
 | **Timestamps are synthesised** from the inspected frame rate, not read from the stream. Fine for live playback; the upgrade path is MPEG-TS output. | [PROTOCOL.md](PROTOCOL.md) |
@@ -184,8 +173,8 @@ multiple cameras on one page. [README](../README.md#roadmap) says why for each.
 
 ## Loose ends you can close in minutes
 
-- **Cut `v0.4.0` and `v0.5.0`.** Phases 3 and 4 have both landed and both CHANGELOG sections are
-  written — tag and push, and the releases publish themselves.
+- **Cut `v0.4.0`, `v0.5.0` and `v0.6.0`.** Phases 3 to 5 have landed and each has its CHANGELOG
+  section written — tag and push, and the releases publish themselves.
 - **Publish the earlier GitHub releases.** All three tags are pushed but have no release objects.
   Actions → *Release* → *Run workflow* backfills them from the CHANGELOG.
 - **Deploy to Fly**, if the demo is wanted — [DEPLOYMENT.md](DEPLOYMENT.md) has the four commands,

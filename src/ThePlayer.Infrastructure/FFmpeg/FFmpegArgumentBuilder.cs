@@ -40,20 +40,46 @@ public static class FFmpegArgumentBuilder
     private const int AssumedFrameRate = 25;
 
     /// <summary>
+    /// The JPEG encoder. Software, and deliberately so.
+    /// </summary>
+    /// <remarks>
+    /// Hardware MJPEG encoders exist on some engines and are not worth reaching for here. The point
+    /// of this mode is that the <em>server</em> pays for everything, and the JPEG encode is the
+    /// cheap half of that bill next to the decode - which does still run on the device.
+    /// </remarks>
+    private const string PictureEncoder = "mjpeg";
+
+    /// <summary>
     /// The command line for an elementary stream on stdout, read by the frame socket.
     /// </summary>
     /// <param name="profile">
     /// The engine to convert with, overriding the plan's own choice - this is what makes runtime
     /// fallback possible. Ignored when the plan requires no conversion.
     /// </param>
+    /// <param name="pictures">
+    /// Quality and size for the picture path. Ignored unless the plan delivers MJPEG.
+    /// </param>
     public static string ForFrameStream(
         MediaAddress address,
         VideoFormat format,
         BroadcastPlan plan,
         AccelerationProfile? profile,
-        TimeSpan rtspConnectTimeout)
+        TimeSpan rtspConnectTimeout,
+        PictureOptions? pictures = null)
     {
         var codec = DeliveredCodec(plan);
+
+        if (codec == VideoCodec.Mjpeg)
+        {
+            // No bitstream filter, because JPEG images delimit themselves: FF D8 opens one and
+            // FF D9 closes it. Nothing has to be injected to find the boundaries.
+            return string.Join(
+                ' ',
+                Preamble,
+                Input(address, plan, profile, rtspConnectTimeout),
+                Pictures(format, profile, pictures ?? new PictureOptions()),
+                "-f mjpeg -");
+        }
 
         return string.Join(
             ' ',
@@ -130,7 +156,12 @@ public static class FFmpegArgumentBuilder
             {
                 parts.Add($"-hwaccel {accelerator}");
 
-                if (profile.DecodeOutputFormat is { Length: > 0 } outputFormat)
+                // Keeping frames on the device is right when a device encoder consumes them, and
+                // wrong when a software one does. The JPEG encoder is software, so asking for
+                // device frames here produces "Impossible to convert between the formats" at the
+                // first picture rather than a faster pipeline.
+                if (profile.DecodeOutputFormat is { Length: > 0 } outputFormat &&
+                    plan.OutputCodec != VideoCodec.Mjpeg)
                 {
                     parts.Add($"-hwaccel_output_format {outputFormat}");
                 }
@@ -187,6 +218,37 @@ public static class FFmpegArgumentBuilder
     }
 
     /// <summary>
+    /// Decode on the device where there is one, then encode independent JPEG images on the CPU.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The vendor tuning a profile carries is for its H.264 encoder and means nothing to this one -
+    /// <c>-preset p1 -tune ll</c> handed to <c>mjpeg</c> is an error, not a no-op. So the profile
+    /// is used for the <em>decode</em> half here and nothing else, which is also the honest
+    /// description of what it is doing in this mode.
+    /// </para>
+    /// <para>
+    /// <c>-bf</c> and <c>-g</c> are absent because they have nothing to say: every JPEG is
+    /// independent, so there are no B-frames to disable and no group of pictures to bound.
+    /// </para>
+    /// </remarks>
+    private static string Pictures(VideoFormat format, AccelerationProfile? profile, PictureOptions options)
+    {
+        var parts = new List<string>(4) { "-an", $"-c:v {PictureEncoder}", $"-q:v {options.Quality}" };
+
+        // Scaling is the only real defence against what this mode costs on a network. MJPEG has no
+        // inter-frame compression at all, so it runs five to ten times the bandwidth of H.264 at
+        // comparable quality - fine on a LAN, not fine over a WAN.
+        if (options.MaxWidth > 0 && format.Width > options.MaxWidth)
+        {
+            // -2 keeps the aspect ratio and rounds to an even height, which the encoder requires.
+            parts.Add($"-vf scale={options.MaxWidth}:-2");
+        }
+
+        return string.Join(' ', parts);
+    }
+
+    /// <summary>
     /// The GOP length, derived from the source frame rate rather than fixed.
     /// </summary>
     /// <remarks>
@@ -212,15 +274,14 @@ public static class FFmpegArgumentBuilder
     /// </remarks>
     public static VideoCodec DeliveredCodec(BroadcastPlan plan) => plan.OutputCodec switch
     {
-        VideoCodec.H264 or VideoCodec.H265 => plan.OutputCodec,
+        VideoCodec.H264 or VideoCodec.H265 or VideoCodec.Mjpeg => plan.OutputCodec,
 
-        // MJPEG has no Annex-B framing and no parameter sets, so it needs a different reader and a
-        // different muxer. That is Phase 5, and guessing here would produce a stream the frame
-        // reader silently fails to split.
+        // Everything else would need a muxer and a reader that do not exist. Guessing here would
+        // produce a stream the frame reader silently fails to split.
         _ => throw new ArgumentOutOfRangeException(
             nameof(plan),
             plan.OutputCodec,
-            "Only H.264 and H.265 can be carried as an elementary stream."),
+            "Only H.264, H.265 and MJPEG can be carried over the frame socket."),
     };
 
     /// <summary>The bitstream filter that inserts access unit delimiters, named per codec.</summary>

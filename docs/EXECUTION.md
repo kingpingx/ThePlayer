@@ -18,7 +18,7 @@ appearing in a browser, and which file to open when you want to change something
 |---|---|
 | [0 · Orientation](#0--orientation) | processes, ports, and who does what |
 | [1 · Architecture](#1--architecture) | layers, ports and adapters, where each concern lives |
-| [2 · Execution and flow](#2--execution-and-flow) | startup · playback · conversion · sharing · teardown · health · failure |
+| [2 · Execution and flow](#2--execution-and-flow) | startup · playback · conversion · sharing · teardown · health · metrics · failure |
 | [3 · Every file](#3--every-file-and-what-it-is-for) | file-by-file tour of the whole repository |
 | [4 · Declared but not wired up](#4--declared-but-not-yet-wired-up) | seams left for later phases |
 
@@ -321,7 +321,51 @@ black screen.
 Hardware acceleration is deliberately **not** a health input. A machine that can only encode with
 libx264 still plays video, and reporting it unhealthy would page someone for nothing.
 
-### 2.8 When it fails
+### 2.8 Metrics
+
+What the server is doing, once a second, to every browser watching.
+
+```
+   resource-monitor      MetricsStream        MetricsCollector      readers
+        │                     │                     │                  │
+        │ EventSource /api/metrics/stream           │                  │
+        ├────────────────────▶│ Subscribe ─────────▶│                  │
+        │◀── data: {...} ─────┤◀── channel ─────────┤◀── one sample ───┤
+        │                     │                     │   fanned to all  │
+        │  no listeners  →  no sampling at all      │                  │
+```
+
+| # | File | What happens |
+|---|---|---|
+| 1 | [`MetricsSampler.cs`](../src/ThePlayer.Api/MetricsSampler.cs) | Sleeps **after** each sample rather than ticking on a fixed rate. `PeriodicTimer` keeps a rate, so a slow sample leaves a tick already due and the next fires immediately - observed as pairs of readings a tenth of a second apart, each paying for a process spawn |
+| 2 | `MetricsCollector.SampleAsync` | Returns immediately if nobody is listening. A server with no browser attached does no work at all |
+| 3 | [`NvidiaGpuReader.cs`](../src/ThePlayer.Infrastructure/Monitoring/NvidiaGpuReader.cs) | One `nvidia-smi` per sample. The streaming alternative returns one good sample and then `[Unknown Error]` forever, so this is a correction rather than an oversight. A bracketed field makes the whole row unavailable - never zero |
+| 4 | [`SystemMetricsReader.cs`](../src/ThePlayer.Infrastructure/Monitoring/SystemMetricsReaders.cs) | `GetSystemTimes` or `/proc/stat`. Returns **null** on its first call: CPU is a rate, and a rate needs two samples |
+| 5 | [`ProcessTree.cs`](../src/ThePlayer.Infrastructure/Monitoring/ProcessTree.cs) | The process ids to add up for one broadcast - the root and everything under it. See below |
+| 6 | [`ProcessMetricsReader.cs`](../src/ThePlayer.Infrastructure/Monitoring/ProcessMetricsReader.cs) | Processor time over wall time over core count, so 100 means "this stream is saturating the machine" and can be compared with the system figure beside it |
+| 7 | `MetricsCollector.MeasureBroadcasts` | A broadcast with no process of ours reports **null and a reason**, not zero. That is the pass-through WebRTC path, where the finding is that there is nothing to measure |
+| 8 | [`MetricsStream.cs`](../src/ThePlayer.Api/MetricsStream.cs) | One `data:` line per reading, and a `: keep-alive` comment when one is late so a proxy does not close the connection |
+| 9 | `resource-monitor.component.ts` | Renders a figure only when there is one. An absent figure is its reason, because an idle GPU and a failed query are the same number |
+
+#### The bug worth remembering
+
+Per-broadcast CPU read `0.0%` for a transcode that was demonstrably running. On Windows with a
+Chocolatey FFmpeg the process this server starts is a **shim**: it launches the real `ffmpeg.exe` as
+its own child and then idles. Measuring the process we started measured the shim.
+
+What makes it worth writing down is not the fix but how it was found. Every unit test passed, and
+`0.0%` for a cheap real-time transcode is entirely plausible - it would have shipped. It surfaced
+only by measuring the same thing a second way, through `Win32_Process`, and comparing the two.
+
+The subtree was always the right unit: `Kill(entireProcessTree: true)` had been used everywhere
+since Phase 1 for exactly this reason. **Cost is now measured the way it is killed.**
+
+The fix carried a smaller lesson of its own. `PROCESSENTRY32` needs `CharSet.Unicode` on the
+*struct*, not only on the `DllImport` - without it `dwSize` goes out wrong and `Process32FirstW`
+refuses, silently, because the failure path returns an empty map. The symptom was every process on
+the machine appearing to have no children.
+
+### 2.9 When it fails
 
 | Status | Raised by | When |
 |---|---|---|
@@ -376,6 +420,7 @@ In dependency order. The last column is the thing worth knowing that the filenam
 | [`Broadcasting/BroadcastPlanner.cs`](../src/ThePlayer.Application/Broadcasting/BroadcastPlanner.cs) | 149 | The negotiation table: what the server will do to a stream, and which modes can be offered | `WebRtcSafeCodec = H264` is the single constant encoding the whole "browsers refuse H.265 in SDP" judgement. Pure — no I/O, no state, nothing injected |
 | [`Broadcasting/BroadcastCoordinator.cs`](../src/ThePlayer.Application/Broadcasting/BroadcastCoordinator.cs) | 390 | `BroadcastOptions` · `WatchTicket` · the registry of everything live | One `SemaphoreSlim` guards four dictionaries, and is held for bookkeeping only — never across an inspection or a publish. `StartPipelineAsync` has three shapes and the plan picks between them: pass-through WebRTC costs this process no child at all, converted WebRTC needs a transcoder, and the socket modes need a frame pipeline |
 | [`Monitoring/HealthReporter.cs`](../src/ThePlayer.Application/Monitoring/HealthReporter.cs) | 32 | Assembles `/api/health` | Concrete rather than a port: it performs no I/O of its own, it only composes ports that do |
+| [`Monitoring/MetricsCollector.cs`](../src/ThePlayer.Application/Monitoring/MetricsCollector.cs) | 250 | `MetricsOptions` · the sampler and its fan-out *(Phase 4)* | One sample serves every listener, and none is taken when there are none. Both matter for the same reason: a GPU reading costs a process spawn, so sampling per request would put the monitor's own cost into the numbers it reports |
 | [`Monitoring/EncoderFallbackLog.cs`](../src/ThePlayer.Application/Monitoring/EncoderFallbackLog.cs) | 120 | The record of engines that refused at runtime *(Phase 3)* | Bounded to 20, newest first. `Summarise` keeps the line naming the encoder rather than the first line, because a hardware profile refusing a stream complains about its decoder several lines before its encoder gets a turn |
 | [`Broadcasting/FrameBroadcaster.cs`](../src/ThePlayer.Application/Broadcasting/FrameBroadcaster.cs) | 196 | One pipeline fanned out to many viewers | The backpressure rule lives in `Deliver`: fill your queue and you are skipped to the next keyframe with your queue emptied. Losing frames is survivable; rendering from a broken reference chain is not |
 
@@ -393,6 +438,10 @@ In dependency order. The last column is the thing worth knowing that the filenam
 | [`FFmpeg/CodecStringBuilder.cs`](../src/ThePlayer.Infrastructure/FFmpeg/CodecStringBuilder.cs) | 210 | RFC 6381 strings from parameter sets | H.264 is three bytes copied out. H.265 needs a bit reader, emulation-prevention stripping, and the 32 compatibility flags reversed — `0x60000000` becomes `6` |
 | [`FFmpeg/FFmpegStreamingPipeline.cs`](../src/ThePlayer.Infrastructure/FFmpeg/FFmpegStreamingPipeline.cs) | 430 | `IFramePipeline` · `EncoderRefusedException` · `FFmpegFrameStream` | `StartAsync` returns only once parameter sets have arrived, buffering what it read while waiting. On Windows with a Chocolatey FFmpeg the spawned process is a *shim* whose real ffmpeg is its child, which is why `Kill(entireProcessTree: true)` is load-bearing. Since Phase 3 it walks the engine ranking, and the frame stream is built from the **delivered** codec, not the source's |
 | [`FFmpeg/FFmpegArgumentBuilder.cs`](../src/ThePlayer.Infrastructure/FFmpeg/FFmpegArgumentBuilder.cs) | 220 | Plan + profile → command line, for both destinations *(Phase 3)* | Pure and static, so every decision this phase makes is a plain assertion on a string. `-hwaccel` is an **input** option: placed after `-i` it is silently ignored and the decode quietly happens on the CPU, which looks like a slow machine rather than a bug |
+| [`Monitoring/SystemMetricsReaders.cs`](../src/ThePlayer.Infrastructure/Monitoring/SystemMetricsReaders.cs) | 240 | System CPU and memory *(Phase 4)* | `GetSystemTimes` reports kernel time **including** idle, so adding all three counters double-counts it and quietly under-reports a busy machine. Linux uses `MemAvailable`, not `MemFree` - free memory excludes the page cache, so a healthy host would read as almost full |
+| [`Monitoring/ProcessTree.cs`](../src/ThePlayer.Infrastructure/Monitoring/ProcessTree.cs) | 230 | Who is whose child *(Phase 4)* | Exists because of one wrong number. `CharSet.Unicode` belongs on the **struct**, not just the `DllImport` - otherwise `dwSize` is wrong and the call fails silently, and every process appears childless |
+| [`Monitoring/ProcessMetricsReader.cs`](../src/ThePlayer.Infrastructure/Monitoring/ProcessMetricsReader.cs) | 155 | What one broadcast costs *(Phase 4)* | Summed over the subtree, and divided by core count so the figure can be compared with the system one rather than exceeding it |
+| [`Monitoring/NvidiaGpuReader.cs`](../src/ThePlayer.Infrastructure/Monitoring/NvidiaGpuReader.cs) | 250 | `GpuMetricsOptions` · the GPU reader · `UnavailableGpuReader` *(Phase 4)* | One process per sample, deliberately. A bracketed field means unavailable, never zero - an idle GPU and a failed query are otherwise the same panel |
 | [`FFmpeg/EncoderSelection.cs`](../src/ThePlayer.Infrastructure/FFmpeg/EncoderSelection.cs) | 110 | Which engines to try, and whether a failure is worth retrying *(Phase 3)* | The distinction that stops a fallback being pointless: an unreachable camera fails identically on every engine, so walking the ranking would spend one connection timeout per profile to reach the same answer |
 
 ### `ThePlayer.Api` — the host
@@ -403,6 +452,9 @@ In dependency order. The last column is the thing worth knowing that the filenam
 | [`ServiceRegistration.cs`](../src/ThePlayer.Api/ServiceRegistration.cs) | 93 | The composition root — every concrete type is chosen here and nowhere else | The three-way registration of `MediaMtxSupervisor` ([§2.1 step 3](#21--startup-dotnet-run)). `TimeProvider.System` is injected so linger and cache expiry can be tested by advancing a fake clock instead of sleeping |
 | [`Endpoints.cs`](../src/ThePlayer.Api/Endpoints.cs) | 198 | The four endpoints and the mapping to and from `Contracts.cs` | Translation only — no orchestration, no decisions. The exception→status table lives here, and `ToSummary` returns `Address.Display`, never the raw address |
 | [`Contracts.cs`](../src/ThePlayer.Api/Contracts.cs) | 108 | The wire DTOs | Separate from Domain so an internal rename is not a breaking API change. `[JsonPropertyName("ffmpegVersion")]` is explicit because the default camel-case policy turns `FFmpegVersion` into `fFmpegVersion` |
+| [`MetricsStream.cs`](../src/ThePlayer.Api/MetricsStream.cs) | 120 | `GET /api/metrics/stream` *(Phase 4)* | SSE, not a WebSocket: one-way, text and periodic, and `EventSource` reconnects for free. `X-Accel-Buffering: no` because a proxy buffering a feed whose whole point is to be current would defeat it silently |
+| [`MetricsContracts.cs`](../src/ThePlayer.Api/MetricsContracts.cs) | 95 | The metrics wire DTOs *(Phase 4)* | Every figure nullable, which is the contract rather than caution. Carries no address at all - this feed is polled every second |
+| [`MetricsSampler.cs`](../src/ThePlayer.Api/MetricsSampler.cs) | 85 | The loop driving `SampleAsync` *(Phase 4)* | Sleeps after the work rather than on a fixed rate, so a slow sample delays the next one instead of causing two in quick succession |
 | [`BroadcastSweeper.cs`](../src/ThePlayer.Api/BroadcastSweeper.cs) | 56 | The 2 s timer driving `SweepAsync` | The timer lives here rather than inside the coordinator so tests can advance a fake clock and call the sweep directly, instead of waiting on wall time |
 | [`VideoStreamSocket.cs`](../src/ThePlayer.Api/VideoStreamSocket.cs) | 235 | `WS /ws/frames/{viewerId}` | Reads from the socket it never sends to, purely to notice when the client goes away — a send to a half-open socket can otherwise block indefinitely |
 | [`wwwroot/index.html`](../src/ThePlayer.Api/wwwroot/index.html) | 256 | A dependency-free WHEP client: capability probe, watch call, handshake, teardown | Not throwaway scaffolding — its handshake is what `server-assisted-player.component.ts` will do, so it is the **reference** for that port, and stays afterwards as a fallback |
@@ -460,7 +512,7 @@ these currently appears exactly once in the tree, at its own declaration:
 | `Broadcast.HasViewer` | `Broadcasting/Broadcast.cs` | Unused: the coordinator authorises through `_viewerToBroadcast` instead |
 | `ClientDecodeSupport.CanDecodeInHardware` | `Playback/PlaybackMode.cs` | Unused server-side — the *client* makes this distinction, in `capability-panel` |
 | `VideoCodecNames.ToProbeString` | `Media/VideoFormat.cs` | Unused server-side — the probe strings live in `client-capabilities.service.ts`, where the probing happens |
-| `IPublishedStream.Acceleration` | `Ports.cs` | Phase 4 — which engine is actually running is worth showing next to the GPU load it explains |
+| `IPublishedStream.Acceleration` | `Ports.cs` | Still unused after Phase 4. The metrics feed reports what a broadcast costs but not which engine is spending it, so a host that fell back to libx264 shows a flat GPU graph with the explanation only in `/api/health` |
 
 `Broadcast.MarkEnded` and `BroadcastState.Ended` were on this list until Phase 2 and are now wired
 up: the sweep transcribes a pipeline that ran out into an ended broadcast, which starts its linger

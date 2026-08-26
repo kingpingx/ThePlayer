@@ -91,6 +91,9 @@ public class BroadcastCoordinatorTests
     {
         public StreamInitialisation Initialisation { get; } = new("avc1.42c01f", 1920, 1080, 25);
 
+        /// <summary>No real process behind this one, which is what a metrics reader must survive.</summary>
+        public int? ProcessId => null;
+
         public async IAsyncEnumerable<EncodedFrame> FramesAsync(
             [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
         {
@@ -109,6 +112,8 @@ public class BroadcastCoordinatorTests
     private sealed class RunningPublisher : IPublishedStream
     {
         public AccelerationProfile Acceleration => AccelerationProfile.Software;
+
+        public int? ProcessId => null;
 
         public bool HasEnded { get; private set; }
 

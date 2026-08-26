@@ -4,6 +4,7 @@ using ThePlayer.Application.Monitoring;
 using ThePlayer.Infrastructure.FFmpeg;
 using ThePlayer.Application.Security;
 using ThePlayer.Infrastructure.MediaServer;
+using ThePlayer.Infrastructure.Monitoring;
 using ThePlayer.Infrastructure.Networking;
 
 namespace ThePlayer.Api;
@@ -25,6 +26,8 @@ public static class ServiceRegistration
         services.AddOptionsWithValidation<MediaMtxOptions>(configuration, MediaMtxOptions.SectionName);
         services.AddOptionsWithValidation<BroadcastOptions>(configuration, BroadcastOptions.SectionName);
         services.AddOptionsWithValidation<AddressPolicyOptions>(configuration, AddressPolicyOptions.SectionName);
+        services.AddOptionsWithValidation<MetricsOptions>(configuration, MetricsOptions.SectionName);
+        services.AddOptionsWithValidation<GpuMetricsOptions>(configuration, GpuMetricsOptions.SectionName);
 
         services.AddHttpClient();
 
@@ -60,6 +63,18 @@ public static class ServiceRegistration
         services.AddSingleton<BroadcastPlanner>();
         services.AddSingleton<BroadcastCoordinator>();
         services.AddHostedService<BroadcastSweeper>();
+
+        // Singletons because both are stateful in the same way: CPU is a rate, so a reader is the
+        // memory of its own previous sample and a second instance would report nothing until it
+        // had one of its own.
+        services.AddSingleton<ISystemMetricsReader, SystemMetricsReader>();
+        services.AddSingleton<IProcessMetricsReader, ProcessMetricsReader>();
+        services.AddSingleton<IGpuMetricsReader, NvidiaGpuReader>();
+
+        // The collector is the fan-out, so there has to be exactly one of it: two would sample the
+        // machine twice and hand each half of the clients a different reading of the same instant.
+        services.AddSingleton<MetricsCollector>();
+        services.AddHostedService<MetricsSampler>();
 
         // One instance playing three roles: the hosted service that runs it, and the port that
         // the health endpoint reads. Resolving the same object for both is what makes the status

@@ -135,6 +135,16 @@ public interface IFrameStream : IAsyncDisposable
     StreamInitialisation Initialisation { get; }
 
     /// <summary>
+    /// The child process doing the work, or <c>null</c> if it has already gone.
+    /// </summary>
+    /// <remarks>
+    /// Exposed so that what this broadcast costs can be measured, which is the comparison the
+    /// project exists to make. An id rather than the <c>Process</c> itself: the metrics reader has
+    /// no business holding a handle it might dispose out from under the pipeline that owns it.
+    /// </remarks>
+    int? ProcessId { get; }
+
+    /// <summary>
     /// Every frame, in order, starting with any buffered during <see cref="IFramePipeline.StartAsync"/>.
     /// </summary>
     /// <remarks>Enumerable once. The broadcaster is the only caller, and it fans out to viewers.</remarks>
@@ -178,6 +188,9 @@ public interface IPublishingPipeline
 /// <summary>A conversion currently feeding the edge server.</summary>
 public interface IPublishedStream : IAsyncDisposable
 {
+    /// <summary>The transcoder's process id, or <c>null</c> once it has exited.</summary>
+    int? ProcessId { get; }
+
     /// <summary>
     /// The engine that is actually doing the work, which is not necessarily the one the plan
     /// asked for - see <c>EncoderFallbackLog</c>.
@@ -192,6 +205,57 @@ public interface IPublishedStream : IAsyncDisposable
     /// on paper, and every later viewer joins a path with nothing publishing to it.
     /// </remarks>
     bool HasEnded { get; }
+}
+
+/// <summary>
+/// Reads what the whole machine is doing - CPU and memory.
+/// </summary>
+/// <remarks>
+/// A port because the answer comes from the operating system by a different route on each one:
+/// <c>GetSystemTimes</c> on Windows, <c>/proc</c> on Linux. Stateful by nature - CPU is a rate, so
+/// a reading is the difference between two samples and the first one has nothing to subtract from.
+/// </remarks>
+public interface ISystemMetricsReader
+{
+    /// <summary>
+    /// Takes a reading. Never throws: a machine whose counters cannot be read still has to serve
+    /// video, and the snapshot says so rather than failing the request that asked for it.
+    /// </summary>
+    Task<SystemUtilisation> ReadAsync(CancellationToken cancellationToken = default);
+}
+
+/// <summary>
+/// Reads GPU utilisation, split by engine.
+/// </summary>
+/// <remarks>
+/// A port for two reasons rather than one: it shells out to a vendor tool, and there is a real
+/// second implementation - the null object used on every machine without an NVIDIA card, which
+/// reports unavailability <em>with its reason</em> instead of zeroes.
+/// </remarks>
+public interface IGpuMetricsReader
+{
+    /// <summary>
+    /// Takes a reading. Never throws - an unreadable GPU is reported as unavailable, because the
+    /// health of the metrics feed must not depend on the health of the thing it measures.
+    /// </summary>
+    Task<GpuUtilisation> ReadAsync(CancellationToken cancellationToken = default);
+}
+
+/// <summary>
+/// Reads what individual processes are costing.
+/// </summary>
+/// <remarks>
+/// Stateful like <see cref="ISystemMetricsReader"/>, and for the same reason: CPU is processor time
+/// divided by wall time, so it exists only between two readings. Processes that have gone away are
+/// forgotten rather than reported as idle.
+/// </remarks>
+public interface IProcessMetricsReader
+{
+    /// <summary>
+    /// Reads every process id given, in one pass. Ids that no longer exist are absent from the
+    /// result rather than present with zeroes.
+    /// </summary>
+    IReadOnlyDictionary<int, ProcessUtilisation> Read(IReadOnlyCollection<int> processIds);
 }
 
 /// <summary>

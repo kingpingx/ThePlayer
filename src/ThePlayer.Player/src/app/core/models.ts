@@ -108,3 +108,55 @@ export const MODE_BLURBS: Record<PlaybackMode, string> = {
   ServerAssisted: 'Server converts only if it must. Your GPU decodes H.264 via WebRTC.',
   ServerDecoded: 'Server decodes fully and sends pictures. Your GPU decodes no video at all.',
 };
+
+/*
+ * Server metrics — `GET /api/metrics/stream`, Server-Sent Events.
+ *
+ * Every figure is nullable, and that is the contract rather than defensive typing. An idle GPU and
+ * a failed query look identical if failure is reported as zero, so the server sends null and a
+ * reason instead, and this file refuses to let a component forget that.
+ */
+
+export type GpuAvailability = 'Available' | 'NotSupported' | 'ToolMissing' | 'NoPermission';
+
+export interface GpuMetrics {
+  availability: GpuAvailability;
+  overallPercent: number | null;
+
+  /** NVENC. The number that proves the server is converting. */
+  encoderPercent: number | null;
+
+  /** NVDEC. */
+  decoderPercent: number | null;
+  memoryUsedBytes: number | null;
+
+  /** Written to be shown as-is. Non-null exactly when `availability` is not `Available`. */
+  unavailableReason: string | null;
+}
+
+/** What one live broadcast costs the server. */
+export interface BroadcastCost {
+  key: string;
+  mode: PlaybackMode;
+  converted: boolean;
+
+  /** Share of one machine's worth of CPU, already divided by core count. */
+  cpuPercent: number | null;
+  memoryBytes: number | null;
+
+  /**
+   * Why there is no figure. Non-null for a pass-through `ServerAssisted` stream, which has no
+   * process on the server to measure — not a gap in the instrumentation but the point being made.
+   */
+  unavailableReason: string | null;
+}
+
+export interface ServerMetrics {
+  /** Lets a client tell a stalled feed from an idle machine, which look identical otherwise. */
+  takenAt: string;
+  cpuPercent: number | null;
+  memoryUsedBytes: number | null;
+  memoryTotalBytes: number | null;
+  gpu: GpuMetrics;
+  broadcasts: BroadcastCost[];
+}

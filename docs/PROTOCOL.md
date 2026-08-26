@@ -15,11 +15,11 @@ Everything is JSON, camel-cased, over HTTP. Three transports:
 
 ---
 
-## Status: Phase 3
+## Status: Phase 4
 
-`GET /api/health`, `POST /api/watch`, `DELETE /api/watch/{viewerId}`, `GET /api/broadcasts` and
-`WS /ws/frames/{viewerId}` all exist. The metrics stream is specified below as it will be built, so
-this document and the code stay in step rather than diverging.
+Every endpoint below is built. `GET /api/health`, `POST /api/watch`,
+`DELETE /api/watch/{viewerId}`, `GET /api/broadcasts`, `WS /ws/frames/{viewerId}` and
+`GET /api/metrics/stream` all exist and are exercised by the player.
 
 ---
 
@@ -260,38 +260,67 @@ next keyframe so it never renders from a broken reference chain.
 
 ---
 
-## Planned — Phase 4
-
-### `GET /api/metrics/stream` — Server-Sent Events
+## `GET /api/metrics/stream` — Server-Sent Events
 
 SSE rather than a WebSocket: the flow is one-way, text and periodic, and `EventSource` gives
 automatic reconnection for free where a WebSocket needs hand-written ping/pong. It also keeps the
 frame WebSocket dedicated to binary video, so a metrics hiccup cannot disturb playback.
 
+One `data:` line per reading, plus a `: keep-alive` comment when a reading is late — ignored by
+`EventSource`, and enough to stop a proxy closing an idle connection.
+
 ```jsonc
 {
-  "cpuPercent": 12.4,
-  "memoryUsedBytes": 8_100_000_000,
+  "takenAt": "2026-08-26T17:14:22.51Z",  // so a stalled feed is distinguishable from an idle machine
+  "cpuPercent": 12.4,                    // null on the first reading: a rate needs two samples
+  "memoryUsedBytes": 8100000000,
+  "memoryTotalBytes": 16000000000,
   "gpu": {
     "availability": "Available",   // or NotSupported · ToolMissing · NoPermission
     "overallPercent": 41,
     "encoderPercent": 38,          // NVENC - the number that proves conversion is happening
     "decoderPercent": 35,          // NVDEC
-    "memoryUsedBytes": 1_200_000_000,
+    "memoryUsedBytes": 1200000000,
     "unavailableReason": null
   },
   "broadcasts": [
-    { "fingerprint": "8f14e45fceea167a", "cpuPercent": 61.2, "memoryBytes": 190_000_000 }
+    {
+      "key": "8f14e45fceea167a-clientdecoded-h264-converted",
+      "mode": "ClientDecoded",
+      "converted": true,
+      "cpuPercent": 61.2,          // share of one machine, already divided by core count
+      "memoryBytes": 190000000,
+      "unavailableReason": null
+    }
   ]
 }
 ```
 
 Encoder and decoder utilisation are reported **separately** because that split is what makes the
-three modes legible: `ServerAssisted` on an H.265 feed lights up both, `ClientDecoded` shows zero
-on both.
+three modes legible: a converted H.265 feed lights up both, a passed-through one shows zero on both.
 
-GPU metrics are NVIDIA-only. Intel and AMD report `availability` with a reason rather than a
-plausible-looking wrong number; CPU and per-broadcast metrics work everywhere.
+### Every figure is nullable, and that is the contract
+
+An idle GPU and a failed query produce the same number if failure is reported as zero. So it is not:
+a figure that was not measured is `null`, beside an `unavailableReason` written to be shown as-is.
+The rule applies to `cpuPercent` on the first reading of a feed as much as to a missing GPU.
+
+GPU metrics are NVIDIA-only. `intel_gpu_top` is Linux-only and usually needs elevated privilege,
+`rocm-smi` is Linux-only, and Windows exposes GPU engine data only through per-process counters that
+do not decompose into encode and decode. Those machines get an `availability` and a reason; CPU and
+per-broadcast figures work everywhere.
+
+### `broadcasts[]` keys, not fingerprints
+
+Keyed by the **broadcast key** rather than the address fingerprint, because the comparison this feed
+exists for puts two broadcasts of the *same* address side by side — one converting and one not. They
+share a fingerprint and differ by key, so a fingerprint would collapse exactly the two rows worth
+telling apart. It carries no address, redacted or otherwise: this feed is polled every second and is
+the last place a camera URL should be repeated.
+
+A `null` `cpuPercent` with a reason is the normal state for a pass-through `ServerAssisted` stream.
+The edge server relays it without this process seeing a frame, so there is nothing to measure —
+precisely because nothing is being spent.
 
 ---
 

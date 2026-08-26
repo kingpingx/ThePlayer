@@ -263,6 +263,29 @@ internal sealed class FFmpegFrameStream : IFrameStream
         _initialisation ?? throw new InvalidOperationException("The pipeline has not been started.");
 
     /// <summary>
+    /// The FFmpeg process, while it is still alive.
+    /// </summary>
+    /// <remarks>
+    /// Reading <c>Id</c> on an exited process is fine; reading it after <c>Dispose</c> throws. The
+    /// metrics reader is on a timer and the pipeline can be torn down between two ticks, so this
+    /// answers null rather than making every caller guard.
+    /// </remarks>
+    public int? ProcessId
+    {
+        get
+        {
+            try
+            {
+                return _process.Id;
+            }
+            catch (InvalidOperationException)
+            {
+                return null;
+            }
+        }
+    }
+
+    /// <summary>
     /// What FFmpeg complained about, scrubbed and capped.
     /// </summary>
     /// <remarks>

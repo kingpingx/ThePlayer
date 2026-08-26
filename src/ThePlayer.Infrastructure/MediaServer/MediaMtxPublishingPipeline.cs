@@ -240,6 +240,22 @@ internal sealed class PublishedStream : IPublishedStream
 
     public AccelerationProfile Acceleration { get; }
 
+    /// <summary>The transcoder, while it is still alive. Null once disposed - see the frame stream.</summary>
+    public int? ProcessId
+    {
+        get
+        {
+            try
+            {
+                return _process.Id;
+            }
+            catch (InvalidOperationException)
+            {
+                return null;
+            }
+        }
+    }
+
     public bool HasEnded
     {
         get

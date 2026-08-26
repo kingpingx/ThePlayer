@@ -180,6 +180,19 @@ Server resource metrics are information disclosure — they describe the host's 
 so `/api/metrics/stream` follows the same split as everything else rather than being open by
 default.
 
+As of Phase 4 that endpoint exists and, like everything else, **is not yet behind auth in any
+environment**. Two things about it are worth stating plainly rather than leaving to be discovered:
+
+- **What it tells an anonymous caller.** Core count, installed memory, GPU model class by inference,
+  and the machine's load second by second. It carries no address, not even a redacted one — the
+  broadcast key is deliberately the only identifier in it — but "how many streams are running and
+  how hard is this box working" is legible from it, and that is a reconnaissance signal.
+- **What it costs them.** Sampling runs only while someone is listening, so an open connection makes
+  the server spawn `nvidia-smi` once a second. That is bounded per host rather than per listener —
+  ten connections still cost one sample — which makes it a poor amplification vector, but it is not
+  nothing, and it is one more reason the honest posture for a public deployment is `AddressPolicy`
+  on and the instance private.
+
 ---
 
 ## What conversion costs, and who can spend it

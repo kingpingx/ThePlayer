@@ -64,6 +64,17 @@ public static class Endpoints
             .WithName("StreamFrames")
             .ExcludeFromDescription();
 
+        // Not a minimal-API result either: the handler holds the response open and writes to it
+        // for the life of the connection.
+        app.MapGet("/api/metrics/stream", (
+                HttpContext context,
+                MetricsCollector collector,
+                ILoggerFactory loggerFactory,
+                CancellationToken cancellationToken) =>
+            MetricsStream.HandleAsync(context, collector, loggerFactory, cancellationToken))
+            .WithName("StreamMetrics")
+            .ExcludeFromDescription();
+
         app.MapGet("/api/broadcasts", async (
                 BroadcastCoordinator coordinator,
                 CancellationToken cancellationToken) =>

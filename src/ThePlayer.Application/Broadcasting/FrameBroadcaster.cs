@@ -53,6 +53,9 @@ public sealed class FrameBroadcaster : IAsyncDisposable
     /// <summary>Whether the pipeline has run out of frames - a file that reached its last one.</summary>
     public bool HasEnded { get; private set; }
 
+    /// <summary>The process behind this broadcast, for attributing what it costs.</summary>
+    public int? ProcessId => _stream.ProcessId;
+
     /// <summary>Starts delivering frames to a viewer.</summary>
     /// <returns>The queue to read from. Completes when the broadcast ends or the viewer detaches.</returns>
     public ChannelReader<EncodedFrame> Subscribe(string viewerId)

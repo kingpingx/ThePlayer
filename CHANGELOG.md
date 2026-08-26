@@ -9,6 +9,58 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## Unreleased
 
+### Phase 4: Server CPU and GPU in the client
+
+The browser now shows what the choice costs the machine at the other end, live. Toggle a mode on an
+H.265 feed and the encoder bar is what moves.
+
+This is the phase that makes the previous three legible. "The server is copying bytes" has been true
+since Phase 2 and provable only by reading a boolean; it is now a GPU encoder reading at zero beside
+a converted stream lighting both engines, from the same camera, at the same moment.
+
+#### Added
+
+- **`GET /api/metrics/stream`** — Server-Sent Events. One-way, text and periodic, which is what SSE
+  is for, and `EventSource` reconnects by itself where a WebSocket needs hand-written ping and pong.
+  It also keeps the frame socket dedicated to binary video, so a metrics hiccup cannot disturb
+  playback.
+- **`MetricsCollector`** — one sample fanned out to every listener. Ten open tabs cost one reading,
+  not ten, which matters because a GPU reading costs a process spawn: sampling per request would
+  make the monitor's own cost visible in the numbers it reports. **Sampling stops entirely when
+  nobody is listening.**
+- **`NvidiaGpuReader`** — encode and decode engines read separately, because that split is what
+  makes the three modes tell each other apart. Overall utilisation cannot.
+- **`SystemMetricsReader`** — `GetSystemTimes` on Windows, `/proc/stat` on Linux.
+- **`ProcessMetricsReader`** — what each broadcast costs. The comparison the project exists to make:
+  not "the machine is busy" but "*this* stream costs 0.1% passed through and 0.4% converted".
+- **`resource-monitor`** — beside the capability panel, so what this browser can do and what the
+  server is paying for it sit next to each other.
+
+#### Changed
+
+- **Nullable is the contract, not defensive typing.** An idle GPU and a failed query produce the
+  same number if failure is reported as zero, so a figure that was not measured is `null` beside a
+  reason written to be shown as-is. That applies to `cpuPercent` on a feed's first reading — a rate
+  needs two samples — as much as to a machine with no NVIDIA card.
+- **`[Unknown Error]` from `nvidia-smi` is unavailability, never zero.** One process per sample,
+  which is worse than the streaming design originally planned and is what works: the loop modes
+  return one good sample and then fail every field forever.
+- The metrics sampler sleeps *after* its work rather than using `PeriodicTimer`. A fixed rate meant
+  a sample that overran left a tick already due, so the next fired immediately — observed as pairs
+  of readings a tenth of a second apart, each paying for a process spawn.
+
+#### Fixed
+
+- **Per-broadcast CPU read `0.0%` for a transcode that was running.** On Windows with a Chocolatey
+  FFmpeg the process this server starts is a shim that launches the real one as its child and then
+  idles, so measuring the process we started measured the shim. Cost is now summed over the process
+  *tree* — which was always the right unit, since `Kill(entireProcessTree: true)` has been used for
+  the same reason since Phase 1. Cost is measured the way it is killed.
+
+  Worth recording how it was found: every unit test passed, and `0.0%` for a cheap real-time
+  transcode is entirely plausible. It only surfaced by measuring the same thing a second way,
+  through `Win32_Process`, and comparing.
+
 ### Phase 3: Video conversion
 
 H.265 now plays **everywhere** — converted for clients that need it, passed through untouched for

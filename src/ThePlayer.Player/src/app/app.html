@@ -72,6 +72,10 @@
         (modeChange)="onModeChange($event)" />
 
       <app-capability-panel />
+
+      @if (watch()) {
+        <app-resource-monitor />
+      }
     </aside>
   </div>
 </main>

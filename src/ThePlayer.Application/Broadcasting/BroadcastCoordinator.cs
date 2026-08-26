@@ -52,6 +52,27 @@ public sealed record WatchTicket(
     Uri? WhepUrl,
     string? FrameSocketPath);
 
+/// <summary>
+/// One live broadcast and the process behind it, for attributing what it costs.
+/// </summary>
+/// <remarks>
+/// <para>
+/// <paramref name="ProcessId"/> is null for exactly one case, and that case is the argument the
+/// project makes: a pass-through <c>ServerAssisted</c> stream has no process of ours at all,
+/// because the edge server pulls the camera and relays it without this process seeing a frame.
+/// There is nothing to measure because nothing is being spent.
+/// </para>
+/// <para>
+/// Reported as a separate type rather than by exposing <c>Broadcast</c> with a pid bolted on,
+/// because <c>Broadcast</c> is a Domain type that has no business knowing what a process is.
+/// </para>
+/// </remarks>
+public sealed record RunningBroadcast(
+    string Key,
+    PlaybackMode Mode,
+    bool Converted,
+    int? ProcessId);
+
 /// <summary>One viewer's attachment to a running frame pipeline.</summary>
 /// <param name="Initialisation">What the client needs to configure a decoder.</param>
 /// <param name="Frames">The queue to read from. Completes when the broadcast ends.</param>
@@ -468,6 +489,47 @@ public sealed class BroadcastCoordinator(
         {
             logger.LogInformation("Stopped broadcast {Key}.", broadcast.Key);
         }
+    }
+
+    /// <summary>
+    /// What is live right now, with the process behind each one.
+    /// </summary>
+    /// <remarks>
+    /// Separate from <see cref="ListAsync"/> because the two answer different questions and the
+    /// callers have nothing in common: that one describes broadcasts to a person, this one hands a
+    /// metrics collector the process ids it needs and nothing else. Notably it carries no address,
+    /// not even a redacted one - a metrics feed that is polled every second is the last place a
+    /// camera URL should be repeated.
+    /// </remarks>
+    public async Task<IReadOnlyList<RunningBroadcast>> RunningAsync(
+        CancellationToken cancellationToken = default)
+    {
+        await _gate.WaitAsync(cancellationToken);
+        try
+        {
+            return _broadcasts.Values
+                .Select(broadcast => new RunningBroadcast(
+                    broadcast.Key,
+                    broadcast.Plan.Mode,
+                    broadcast.Plan.RequiresConversion,
+                    ProcessIdFor(broadcast.Key)))
+                .ToList();
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    /// <summary>The child process serving a broadcast, if this process owns one. Called under the lock.</summary>
+    private int? ProcessIdFor(string key)
+    {
+        if (_frameBroadcasters.TryGetValue(key, out var broadcaster))
+        {
+            return broadcaster.ProcessId;
+        }
+
+        return _publishers.TryGetValue(key, out var publisher) ? publisher.ProcessId : null;
     }
 
     /// <summary>What is live right now. Addresses are redacted.</summary>

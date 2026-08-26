@@ -6,20 +6,26 @@ Where the project actually is, and where to pick it up.
 what is **built**, what is **not**, and what the next hour of work should be. Update it when a phase
 lands.
 
-*Last verified: 25 August 2026, on the branch that lands Phase 3.*
+*Last verified: 26 August 2026, on the branch that lands Phases 3 and 4.*
 
 ---
 
 ## Where things stand
 
-**Four phases done, one slice of a fifth.** An RTSP feed or a video file plays in a browser
-whatever codec it is in, and you can choose whether the browser or the server does the decoding.
+**Five phases done, one slice of a sixth.** An RTSP feed or a video file plays in a browser
+whatever codec it is in, you choose whether the browser or the server does the decoding, and the
+page shows what that choice costs the server while it happens.
 
-Phase 3 closed the last gap in that sentence. **H.265 now plays everywhere** — converted for a
-browser that cannot decode it, passed through untouched for one that can. Both can run from the same
-camera at once, on separate pipelines, and `GET /api/broadcasts` shows them side by side: one with
-`converted: false` and a server doing no codec work at all, one with `converted: true` and a busy
-GPU. That contrast *is* the project, and it is now a thing you can look at rather than a claim.
+Phase 3 closed the last gap in the first sentence: **H.265 plays everywhere**, converted for a
+browser that cannot decode it and passed through untouched for one that can. Phase 4 made the
+difference visible rather than merely true. Two broadcasts of one file, side by side, one reading:
+
+```
+cpu 15.9%  gpu 0%  enc 0%  dec 0%  | copying: 0.1% cpu
+cpu 23.2%  gpu 0%  enc 3%  dec 1%  | copying: 0.1% cpu | converting: 0.2% cpu
+```
+
+That contrast *is* the project, and it is now something to look at rather than a claim.
 
 | | Phase | Tag | State |
 |---|---|---|---|
@@ -27,15 +33,15 @@ GPU. That contrast *is* the project, and it is now a thing you can look at rathe
 | ✅ | 1 · First pixels — H.264 over WebRTC | `v0.2.0` | Done |
 | ✅ | 2 · Client-side decoding | `v0.3.0` | Done |
 | ✅ | 3 · Conversion | `v0.4.0` | Done — **not yet tagged** |
+| ✅ | 4 · Server metrics | `v0.5.0` | Done — **not yet tagged** |
 | 🟡 | 6 · Deployment *(partial)* | — | Container, Fly config and address policy done. **Auth not done.** |
-| ⬜ | 4 · Server metrics | `v0.5.0` | Not started — **the next phase** |
-| ⬜ | 5 · Full server decoding | `v0.6.0` | Not started |
+| ⬜ | 5 · Full server decoding | `v0.6.0` | Not started — **the next phase** |
 | ⬜ | 6 · Hardening *(rest)* | `v1.0.0` | Auth, process lifetime, docs |
 
-**197 tests, all passing** — 187 backend (Domain 38, Application 80, Infrastructure 59,
-Architecture 5, Api 5) and 10 in the player.
+**230 tests, all passing** — 213 backend (Domain 38, Application 92, Infrastructure 73,
+Architecture 5, Api 5) and 17 in the player.
 
-Roughly 6,450 lines of C# across four projects, plus an 18-file Angular workspace.
+Roughly 8,260 lines of C# across four projects, plus a 22-file Angular workspace.
 
 ### What still returns `501`
 
@@ -57,7 +63,7 @@ Everything else plays.
 ./tools/fetch-mediamtx.sh           # Linux / macOS
 
 dotnet build
-dotnet test                          # expect 187 passing
+dotnet test                          # expect 213 passing
 
 # Terminal 1 - the API. Launches and supervises MediaMTX itself.
 dotnet run --project src/ThePlayer.Api          # http://localhost:5172
@@ -81,7 +87,15 @@ does not have to. Since Phase 3 both answers play, which is what makes the compa
 
 Worth doing once, because it is the whole demonstration in two requests: watch the same H.265 file
 twice in `ClientDecoded`, once claiming H.265 support and once not. Two broadcasts appear, two
-pipelines run, and the keys differ by a single suffix.
+pipelines run, and the keys differ by a single suffix. Then watch the cost of each:
+
+```bash
+curl -N http://localhost:5172/api/metrics/stream
+```
+
+The GPU encoder figure is the one to watch. It stays at zero for the passed-through stream and rises
+for the converted one — and if it reads `null` with a reason rather than `0`, that is the feed
+saying it could not measure, which is a different thing and deliberately looks different.
 
 > **Windows gotcha.** Killing the API can leave MediaMTX holding ports 8554/8889/9997. The
 > supervisor adopts a survivor on the next start rather than fighting it, so this is a nuisance
@@ -112,6 +126,11 @@ cannot drift into producing different video. `MediaMtxPublishingPipeline`, becau
 pull a camera but will not re-encode one. Runtime encoder fallback, because detection proves an
 encoder *exists* and not that a session can be opened now. **H.265 plays everywhere.**
 
+**Phase 4 — Server metrics.** `GET /api/metrics/stream` over SSE, one sample fanned out to every
+listener and no sampling at all when nobody is watching. GPU encode and decode read separately,
+because that split is what tells the three modes apart. Every figure nullable, because an idle GPU
+and a failed query are different facts that produce the same number if you let them.
+
 **Phase 6, partially — Deployment.** A container carrying everything, `fly.toml`, and `AddressGuard`,
 which bounds what the server will dial. Verified by building and running the image, not by
 inspection.
@@ -120,29 +139,17 @@ inspection.
 
 ## What is left
 
-### Phase 4 — Server metrics · `v0.5.0` · **next**
-
-CPU and GPU in the browser over SSE, so toggling a mode visibly moves the cost between machines.
-Phase 3 is what makes this worth building: there is now a real difference to display, because the
-same feed can be served with the GPU idle or with both its engines lit.
-
-Note the correction already recorded in [ROADMAP.md](ROADMAP.md): `nvidia-smi --loop-ms` returns one
-good sample and then `[Unknown Error]` forever, so it is **one process per sample**.
-
-Two things Phase 3 left ready for it:
-
-- `IPublishedStream.Acceleration` reports which engine is actually running, which is the label the
-  GPU number needs — a machine that fell back to libx264 would otherwise show a flat GPU graph with
-  no explanation on the page.
-- `encoderFallbacks` in `/api/health` already carries why that happened.
-
-### Phase 5 — Full server decoding · `v0.6.0`
+### Phase 5 — Full server decoding · `v0.6.0` · **next**
 
 Small by design, and Phase 3 made it smaller. `FFmpegStreamingPipeline` is parameterised by its
 arguments and an `IFrameReader`, and `FFmpegArgumentBuilder` now owns the argument half — so this is
 an MJPEG branch there plus a `JpegPictureReader`, and no existing class rewritten. Both places that
 currently refuse MJPEG say so explicitly rather than guessing:
 `FFmpegArgumentBuilder.DeliveredCodec` and the `CompressedFrameReader` constructor.
+
+Phase 4 is what makes it worth building rather than merely completing the set. The three-way
+comparison only means something with the cost of each on screen beside it, and it now is: a full
+server decode should show the decoder engine busy and the client doing no decoding at all.
 
 ### Phase 6 — The rest of hardening · `v1.0.0`
 
@@ -163,6 +170,9 @@ Known, deliberate, and written down rather than discovered later.
 | **Orphaned children.** A hard kill of the API leaves MediaMTX running. Mitigated by adoption, not fixed. | [ARCHITECTURE.md](ARCHITECTURE.md) |
 | **FFmpeg command lines are visible** to other processes of the same user, credentials included. | [SECURITY.md](SECURITY.md) |
 | **WebRTC on Fly is unverified.** Docker Desktop NATs on Windows, which breaks ICE locally by design, so it needs a real deploy plus the `WebRtcAdditionalHosts` secret. | [DEPLOYMENT.md](DEPLOYMENT.md) |
+| **GPU metrics are NVIDIA-only.** Intel and AMD machines get an availability state and a reason instead of figures — `intel_gpu_top` and `rocm-smi` are Linux-only and usually need privilege, and Windows exposes no per-engine split. CPU and per-broadcast figures work everywhere. | [PROTOCOL.md](PROTOCOL.md) |
+| **A GPU reading costs a process spawn per second** while anyone watches the feed, because `nvidia-smi --loop-ms` returns one good sample and then fails forever. Sampling stops when the last listener leaves, which is the only thing bounding it. | [ROADMAP.md](ROADMAP.md) |
+| **`IPublishedStream.Acceleration` is still uncalled.** Phase 4 reports what a broadcast costs but not which engine is spending it, so a host that fell back to libx264 shows a flat GPU graph with the explanation only in `/api/health`. | [EXECUTION.md](EXECUTION.md) §4 |
 | **The NVENC session limit is untested on real hardware.** The fallback was exercised end to end, but by making NVENC refuse a 32×32 stream — the development machine is a T550, which is professional silicon with no session cap. On a consumer GeForce the fourth concurrent broadcast is the real case. | Here |
 | **Five members are declared and never called** — `Broadcast.MarkFailed`, `IsPlayable`, `HasViewer`, `ClientDecodeSupport.CanDecodeInHardware`, `VideoCodecNames.ToProbeString` — plus `IPublishedStream.Acceleration`, a seam Phase 4 will read. | [EXECUTION.md](EXECUTION.md) §4 |
 | **Timestamps are synthesised** from the inspected frame rate, not read from the stream. Fine for live playback; the upgrade path is MPEG-TS output. | [PROTOCOL.md](PROTOCOL.md) |
@@ -174,8 +184,8 @@ multiple cameras on one page. [README](../README.md#roadmap) says why for each.
 
 ## Loose ends you can close in minutes
 
-- **Cut `v0.4.0`.** Phase 3 has landed and its CHANGELOG section is written — tag and push, and the
-  release publishes itself.
+- **Cut `v0.4.0` and `v0.5.0`.** Phases 3 and 4 have both landed and both CHANGELOG sections are
+  written — tag and push, and the releases publish themselves.
 - **Publish the earlier GitHub releases.** All three tags are pushed but have no release objects.
   Actions → *Release* → *Run workflow* backfills them from the CHANGELOG.
 - **Deploy to Fly**, if the demo is wanted — [DEPLOYMENT.md](DEPLOYMENT.md) has the four commands,

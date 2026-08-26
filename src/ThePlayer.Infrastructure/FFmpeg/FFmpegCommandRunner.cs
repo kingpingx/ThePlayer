@@ -105,14 +105,25 @@ public sealed class FFmpegCommandRunner(
     /// The address whose credentials must not appear in the result, or <c>null</c> when the command
     /// involves no address at all (a version query, for instance).
     /// </param>
+    /// <param name="timeLimit">
+    /// How long to allow, overriding <see cref="FFmpegOptions.CommandTimeout"/>.
+    /// <para>
+    /// For callers on a schedule rather than on a request. A GPU sample taken every second cannot
+    /// wait twenty for an answer: by then several more samples are due, and a feed that queues them
+    /// behind each other reports the past rather than the present.
+    /// </para>
+    /// </param>
     public async Task<ProcessResult> RunAsync(
         string executable,
         string arguments,
         MediaAddress? scrubWith = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        TimeSpan? timeLimit = null)
     {
+        var limit = timeLimit ?? _options.CommandTimeout;
+
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        timeout.CancelAfter(_options.CommandTimeout);
+        timeout.CancelAfter(limit);
 
         using var process = new Process
         {
@@ -166,7 +177,7 @@ public sealed class FFmpegCommandRunner(
             }
 
             throw new TimeoutException(
-                $"'{Path.GetFileName(executable)}' did not finish within {_options.CommandTimeout.TotalSeconds:0}s.");
+                $"'{Path.GetFileName(executable)}' did not finish within {limit.TotalSeconds:0}s.");
         }
     }
 

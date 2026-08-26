@@ -8,12 +8,12 @@ Chrome, whatever codec it happens to be in. An H.265 feed plays in a browser tha
 H.265. A browser that *can* decode H.265 gets the original bytes untouched, and the server's
 conversion cost drops to zero.
 
-> **Status:** Phase 3 (`v0.4.0`) — conversion. **H.265 now plays everywhere.** A browser that can
-> decode it gets the original bytes and the server does no codec work at all; one that cannot gets
-> the same feed converted, on whichever engine this machine turns out to have. Both can run from the
-> same camera at once, on separate pipelines, and `/api/broadcasts` shows the difference. What is
-> left is server-side metrics (Phase 4), full server decoding (Phase 5) and authentication
-> (Phase 6). See [Roadmap](#roadmap).
+> **Status:** Phase 4 (`v0.5.0`) — the cost is now visible. **H.265 plays everywhere, and the page
+> shows what that costs the server as it happens.** A browser that can decode it gets the original
+> bytes with the GPU's encoder at zero; one that cannot gets the same feed converted, and both
+> engines light up. Two streams from one camera, side by side, with the difference on screen rather
+> than argued for. What is left is full server decoding (Phase 5) and authentication (Phase 6). See
+> [Roadmap](#roadmap).
 
 ---
 
@@ -226,7 +226,7 @@ other processes of the same user, and the server will connect to whatever addres
 | ✅ 1 | First pixels — H.264 RTSP feeds and files play via WebRTC | `v0.2.0` |
 | ✅ 2 | Client-side decoding and the capability panel — **H.265 plays on browsers that can decode it** | `v0.3.0` |
 | ✅ 3 | H.265 conversion — **it plays everywhere**, converted only for clients that need it | `v0.4.0` |
-| 4 | Server CPU and GPU live in the browser | `v0.5.0` |
+| ✅ 4 | Server CPU and GPU live in the browser — **the cost of the choice, on screen** | `v0.5.0` |
 | 5 | Full server decoding and the three-way comparison | `v0.6.0` |
 | 6 | Docker, auth, docs | `v1.0.0` |
 

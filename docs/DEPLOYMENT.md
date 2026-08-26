@@ -128,4 +128,7 @@ Honest gaps, all of them Phase 6:
   [SECURITY.md](SECURITY.md).
 - **No GPU.** Fine for a browser that can decode the source, which still costs the server nothing.
   For one that cannot, conversion on a shared VM is libx264 on a couple of cores, and it will show —
-  one 1080p transcode is about all such a machine has in it.
+  one 1080p transcode is about all such a machine has in it. The resource monitor reports GPU
+  metrics as `NotSupported` there with the reason attached, which is the intended behaviour rather
+  than a gap: CPU and per-broadcast figures still work, and those are the ones that matter on a
+  machine doing software encoding.

@@ -293,7 +293,7 @@ Two things the verification could **not** establish on this machine, recorded ra
 
 ---
 
-# Phase 4 — Server CPU and GPU in the client · `v0.5.0`
+# Phase 4 — Server CPU and GPU in the client · `v0.5.0` · **done**
 
 **Goal:** the browser shows what the server is doing, live. Toggle a mode and watch the cost move.
 
@@ -369,12 +369,53 @@ per-broadcast metrics work everywhere.
 
 ## Verification
 
-- The monitor tracks Task Manager and `nvidia-smi` under load.
-- Toggling `ServerAssisted` → `ClientDecoded` on an H.265 feed drops encoder and decoder to zero,
-  live in the browser.
-- Killing `nvidia-smi` mid-run degrades the UI to "unavailable" with a reason rather than freezing
-  on a stale number.
-- Ten open tabs still produce one sample per interval.
+**Done**, against the real feed rather than by inspection.
+
+- **The comparison works, in one reading.** Two broadcasts of the same H.265 file ran side by side:
+  the passed-through one left encoder and decoder at zero, and the converted one lit both.
+
+  ```
+  cpu 15.9%  gpu 0%  enc 0%  dec 0%  | copying: 0.1% cpu
+  cpu 23.2%  gpu 0%  enc 3%  dec 1%  | copying: 0.1% cpu | converting: 0.2% cpu
+  ```
+
+  The figures are small because the source is 720p paced at real time by `-re`; the T550 barely
+  notices. The shape is the point, and the shape is right.
+- **Per-broadcast CPU was checked against an independent measurement** taken through
+  `Win32_Process` — 0.62% of the machine, against 0.4–1.0% reported. That check is the only reason
+  the bug below was found.
+- **A missing `nvidia-smi` degrades with a reason** and says so once, rather than spending a failed
+  process spawn every second rediscovering it.
+- **Ten listeners cost one sample** — unit-tested, since the point is what does *not* happen.
+
+## What building it changed
+
+- **The sampler does not use `PeriodicTimer`.** It keeps a fixed *rate*, so a sample that overran
+  its interval left a tick already due and the next one fired immediately — observed as pairs of
+  readings under a tenth of a second apart, each paying for a process spawn. Sleeping *after* the
+  work gives a minimum gap instead, which is what the cost actually depends on.
+- **Cost is measured per process *tree*, not per process.** See below.
+- **CPU is divided by core count.** Otherwise a transcode on a 16-core box reports 400% and sits
+  above a system figure of 20%, which is true and useless.
+
+## The bug worth remembering
+
+Per-broadcast CPU read `0.0%` for a transcode that was demonstrably running. On Windows with a
+Chocolatey FFmpeg the process this server starts is a **shim**: it launches the real `ffmpeg.exe` as
+its own child and then idles. Measuring the process we started measured the shim.
+
+Two things about it are worth keeping:
+
+- It was invisible to every unit test, and would have been invisible in the browser too — `0.0%` for
+  a cheap real-time transcode is entirely plausible. It was only caught by measuring the same thing
+  a second way and comparing.
+- The subtree was always the right unit. `Kill(entireProcessTree: true)` had been used everywhere
+  since Phase 1 for exactly this reason. **Cost is now measured the way it is killed.**
+
+The fix needed a parent-process map, and its own smaller lesson: the `PROCESSENTRY32` struct needs
+`CharSet.Unicode` on the *struct*, not just the `DllImport`. Without it `dwSize` goes out wrong and
+`Process32FirstW` refuses — silently, since the failure path returns an empty map. The symptom was
+every process on the machine appearing to have no children at all.
 
 ---
 
